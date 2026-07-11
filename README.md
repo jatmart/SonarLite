@@ -30,8 +30,11 @@ plus the .NET runtime to run on.
    reboot when it asks. This installs one virtual audio device pair named `CABLE Input` /
    `CABLE Output` — SonarLite looks for that exact name, so don't rename it during setup.
 
-That's it — no other software (SonarLite does *not* need Equalizer APO or SteelSeries GG
-installed).
+That's it — no other software required. In particular, SonarLite does **not** need Equalizer
+APO or SteelSeries GG installed; all EQ runs in SonarLite's own DSP chain. (If you happen to have
+an old Equalizer APO install left over from an earlier SonarLite version, it's harmlessly
+detected and neutralized on startup — see `Services/EqualizerApoService.cs` — but a machine
+without Equalizer APO never touches that code path at all.)
 
 ## Getting started
 
