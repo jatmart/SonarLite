@@ -456,8 +456,15 @@ public sealed class AudioSessionService : IDisposable
     /// keeps its Windows endpoint alive (the base station stays on USB), so it will happily accept
     /// the entire mix and play it to nobody -- which is why every "is this device a usable output"
     /// question has to consult this rather than just the endpoint's Active state.
+    ///
+    /// Defaults false, not true: StartEngine's first render-device pick runs before HidChatMixListener
+    /// has even started (MainWindow's constructor calls StartEngine well before _hid.Start()), so at
+    /// that first pick this flag can only ever be a guess -- an unstarted HID thread hasn't reported
+    /// anything yet, and a machine with no base station at all never will. Guessing "off" fails toward
+    /// a real fallback device; guessing "on" fails toward silently rendering to dead air until the
+    /// first HID status report arrives a moment later and corrects it.
     /// </summary>
-    public bool HeadsetOnline { get; set; } = true;
+    public bool HeadsetOnline { get; set; }
 
     public static bool IsHeadset(string name) => name.Contains("Arctis", StringComparison.OrdinalIgnoreCase);
 
