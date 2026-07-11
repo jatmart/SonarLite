@@ -46,21 +46,26 @@ without Equalizer APO never touches that code path at all.)
 ## Getting started
 
 1. Install the two dependencies above and reboot.
-2. Download or build SonarLite (see [Building](#building) below) and run `SonarLite.exe`. It
-   starts minimized to the system tray.
+2. Grab the latest zip from [Releases](https://github.com/jatmart/SonarLite/releases), unzip it
+   anywhere, and run `SonarLite.exe`. No installer, nothing to build — it starts minimized to
+   the system tray.
 3. Open it from the tray icon. It auto-detects the VB-Cable device; assign running apps to a
    bus and adjust each bus's EQ from the window.
 4. Plug in your Arctis Nova Pro — the ChatMix dial and auto-switching pick it up automatically,
    no extra configuration needed.
 
-## Building
+## Building from source
+
+Only needed if you're modifying the code — most people should use the [Releases](https://github.com/jatmart/SonarLite/releases)
+zip instead. Requires the .NET 8 SDK (not just the runtime from step 2 above):
 
 ```
 dotnet build SonarLite.csproj -c Release
 ```
 
-Or open in Visual Studio 2022+ and build normally. Output is a self-contained tray application;
-no installer is provided yet — copy the build output and run `SonarLite.exe`.
+Or open in Visual Studio 2022+ and build normally. This produces `SonarLite.exe` under
+`bin\Release\net8.0-windows\` — run that directly, or re-run the build command any time you
+change source and want to see the change take effect.
 
 ## Status
 
