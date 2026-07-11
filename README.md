@@ -1,20 +1,12 @@
 # SonarLite
 
 A free, from-scratch clone of SteelSeries GG's **Sonar** mixer for Windows: route each running
-app into its own audio bus, EQ each bus independently, and (on supported hardware) control it
-all from a headset's ChatMix dial — without installing SteelSeries GG.
+app into its own audio bus, EQ each bus independently, and control it all from the ChatMix
+dial — without installing SteelSeries GG.
 
-## What it does and doesn't do
-
-| Feature | Works with |
-|---|---|
-| Per-app routing into Game / Chat / Media buses | Any Windows PC — no special hardware |
-| Independent EQ curve per bus | Any Windows PC — no special hardware |
-| Hardware ChatMix dial | **SteelSeries Arctis Nova Pro only** (reads its base station over USB HID) |
-| Automatic default-device switching on headset connect/disconnect | **Devices with "Arctis" in their Windows device name only** |
-
-If you don't have an Arctis Nova Pro, SonarLite still works as a per-app mixer/EQ — you just
-won't get the hardware dial or auto-switching.
+**This app is built specifically for the SteelSeries Arctis Nova Pro** — the ChatMix dial and
+auto-switching talk to that headset's base station directly over USB HID, and won't recognize
+anything else. If you have different hardware, feel free to fork it and adapt the HID layer.
 
 ## What you need before installing
 
@@ -43,8 +35,8 @@ without Equalizer APO never touches that code path at all.)
    starts minimized to the system tray.
 3. Open it from the tray icon. It auto-detects the VB-Cable device; assign running apps to a
    bus and adjust each bus's EQ from the window.
-4. If you have an Arctis Nova Pro, plug it in — the ChatMix dial and auto-switching pick it up
-   automatically, no extra configuration needed.
+4. Plug in your Arctis Nova Pro — the ChatMix dial and auto-switching pick it up automatically,
+   no extra configuration needed.
 
 ## Building
 
