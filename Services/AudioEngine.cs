@@ -32,6 +32,7 @@ public sealed class AudioEngine : IDisposable
     private readonly Dictionary<SessionClass, Bus> _buses = new();
     private readonly Dictionary<SessionClass, double[]> _gains = new();
     private readonly Dictionary<SessionClass, bool> _eqEnabled = new();
+    private readonly Dictionary<SessionClass, double> _preamp = new();
     private readonly Dictionary<SessionClass, float> _busGain = new();
 
     private WasapiOut? _output;
@@ -49,12 +50,20 @@ public sealed class AudioEngine : IDisposable
     /// GetDefaultAudioEndpoint() read.</summary>
     public string? RenderDeviceId => _renderDevice?.ID;
 
+    /// <summary>Friendly name of the device from <see cref="RenderDeviceId"/>, cached at Start().
+    /// Read from the MMDevice each time, this would be a COM call per access -- and callers want it
+    /// on the UI thread, where the device list isn't necessarily populated yet (RefreshDeviceLists
+    /// runs after the first StartEngine), so resolving the name by id through that list would come
+    /// up empty at launch.</summary>
+    public string? RenderDeviceName { get; private set; }
+
     public AudioEngine()
     {
         foreach (SessionClass cls in SessionClasses.All)
         {
             _gains[cls] = new double[10];
             _eqEnabled[cls] = true;
+            _preamp[cls] = 0;
             _busGain[cls] = 1f;
         }
     }
@@ -90,17 +99,18 @@ public sealed class AudioEngine : IDisposable
                 {
                     var mixer = new MixingSampleProvider(_format) { ReadFully = true };
                     var eq = new EqChain(mixer);
-                    eq.SetGains(_gains[cls], _eqEnabled[cls]);
+                    eq.SetGains(_gains[cls], _eqEnabled[cls], _preamp[cls]);
                     var volume = new VolumeSampleProvider(eq) { Volume = _busGain[cls] };
                     master.AddMixerInput(volume);
                     _buses[cls] = new Bus { Mixer = mixer, Eq = eq, Volume = volume };
                 }
 
                 _output = new WasapiOut(headset, AudioClientShareMode.Shared, true, 50);
-                _output.Init(master);
+                _output.Init(new SafetyLimiter(master));
                 _output.Play();
 
                 _renderDevice = headset;
+                try { RenderDeviceName = headset.FriendlyName; } catch { RenderDeviceName = null; }
                 IsRunning = true;
                 Status = "Running";
                 return true;
@@ -208,13 +218,14 @@ public sealed class AudioEngine : IDisposable
         tap.Capture.Dispose();
     }
 
-    public void SetEq(SessionClass cls, double[] gains, bool enabled)
+    public void SetEq(SessionClass cls, double[] gains, bool enabled, double preampDb = 0)
     {
         lock (_sync)
         {
             _gains[cls] = gains;
             _eqEnabled[cls] = enabled;
-            if (_buses.TryGetValue(cls, out var bus)) bus.Eq.SetGains(gains, enabled);
+            _preamp[cls] = preampDb;
+            if (_buses.TryGetValue(cls, out var bus)) bus.Eq.SetGains(gains, enabled, preampDb);
         }
     }
 
@@ -246,6 +257,7 @@ public sealed class AudioEngine : IDisposable
 
         try { _renderDevice?.Dispose(); } catch { }
         _renderDevice = null;
+        RenderDeviceName = null;
         _format = null;
     }
 
