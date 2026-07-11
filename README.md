@@ -1,8 +1,12 @@
 # SonarLite
 
-A free, from-scratch clone of SteelSeries GG's **Sonar** mixer for Windows: route each running
-app into its own audio bus, EQ each bus independently, and control it all from the ChatMix
-dial — without installing SteelSeries GG.
+SteelSeries GG's **Sonar** mixer does the same job — per-app audio routing, per-bus EQ, a
+ChatMix dial — inside an Electron app that idles at several hundred MB of RAM and drags a
+background service tray with it. SonarLite is a from-scratch rewrite of just that mixer, built
+because a tray-resident audio utility has no business costing that much memory. It's a native
+WPF app that idles under 50 MB:
+
+![SonarLite using 32.4 MB of RAM in Task Manager](docs/memory-usage.png)
 
 **This app is built specifically for the SteelSeries Arctis Nova Pro** — the ChatMix dial and
 auto-switching talk to that headset's base station directly over USB HID, and won't recognize
