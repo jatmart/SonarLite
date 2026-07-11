@@ -40,6 +40,7 @@ public partial class MainWindow : Window
     private bool _applyingPreset;
     private bool _suppressPresetEvent;
     private bool _suppressDeviceEvents;
+    private bool _suppressAutostartEvent;
     private int _lastChatPercent = 100;
     private int _lastGamePercent = 100;
 
@@ -73,7 +74,15 @@ public partial class MainWindow : Window
         _audio.Refresh();   // discover the cable + current sessions before the engine starts
         StartEngine();
 
+        // Reflecting the saved state into the checkbox raises Checked, whose handler writes the Run
+        // key with the *currently running* exe path. Unsuppressed, merely launching the app rewrites
+        // autostart to point at whichever build was launched -- so running the Debug exe once
+        // silently repoints Windows startup at bin\Debug, which is overwritten on every rebuild and
+        // gone entirely if the folder is cleaned. The Run key should only move when the user
+        // actually clicks the box.
+        _suppressAutostartEvent = true;
         AutostartCheck.IsChecked = AutostartService.IsEnabled();
+        _suppressAutostartEvent = false;
 
         // Session state changes push through immediately (see AudioSessionService.SessionsChanged),
         // and AudioSessionService.RouteFor triggers its own targeted rescan the instant we retarget
@@ -644,8 +653,11 @@ public partial class MainWindow : Window
             _devices.SetDefaultRecording(device.Id);
     }
 
-    private void AutostartCheck_Changed(object sender, RoutedEventArgs e) =>
+    private void AutostartCheck_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_suppressAutostartEvent) return;
         AutostartService.SetEnabled(AutostartCheck.IsChecked == true);
+    }
 
     // --- ChatMix dial ---
 

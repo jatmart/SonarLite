@@ -26,3 +26,6 @@ publish/
 ## OS files
 Thumbs.db
 .DS_Store
+
+# Local Claude Code config (hooks, settings)
+.claude/
