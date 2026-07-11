@@ -1,0 +1,27 @@
+## .NET / Visual Studio
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+## Rider / VS Code
+.idea/
+*.iml
+.vscode/
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ll]og/
+[Ll]ogs/
+
+## NuGet
+*.nupkg
+**/packages/*
+
+## OS files
+Thumbs.db
+.DS_Store

@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon>SonarLite.ico</ApplicationIcon>
+
+    <!-- A tray-resident mixer should stay small: workstation GC with a non-concurrent collector
+         keeps the heap tight. Do NOT set InvariantGlobalization here — WPF's binding engine calls
+         XmlLanguage.GetSpecificCulture() and throws "Cannot find non-neutral culture" without it.
+         System.GC.ConserveMemory=9 (in runtimeconfig.template.json) makes the collector actually
+         decommit freed segments back to the OS instead of holding them committed in reserve — the
+         reason working set used to grow then stay flat forever rather than falling back once idle. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="HidSharp" Version="2.6.4" />
+    <PackageReference Include="NAudio" Version="2.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ApplicationIcon above only sets the .exe's file icon; the WPF Window.Icon reference
+         below needs the file embedded as a pack resource too, or the title bar/taskbar fall
+         back to the default icon. -->
+    <Resource Include="SonarLite.ico" />
+  </ItemGroup>
+
+</Project>
