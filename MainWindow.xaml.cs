@@ -239,6 +239,52 @@ public partial class MainWindow : Window
         UpdateEqStatus();
         // The engine picks its own render device; the dropdown has to follow it, not predict it.
         SyncPlaybackSelection();
+        SyncDevicePresets();
+    }
+
+    /// <summary>
+    /// Move any bus on a device-voiced preset onto the one matching the device we're actually
+    /// rendering to. Runs from StartEngine, which is the single funnel for both launch and every
+    /// device change (RestartEngine), so this is the one place that knows the output really moved.
+    ///
+    /// Only presets that declare a DeviceKind track the device -- a bus on Immersive, Flat or a
+    /// hand-edited curve is left exactly as the user set it. Choosing Nova Pro or Pebble V2 is what
+    /// opts a bus in, and from then on the pair follows the headset going on and off.
+    /// </summary>
+    private void SyncDevicePresets()
+    {
+        var name = _engine.RenderDeviceName;
+        if (name is null) return;
+
+        // Same classifier the routing layer already ranks devices with, so the preset can never
+        // disagree with which device the engine actually chose.
+        var kind = AudioSessionService.IsHeadset(name) ? DeviceKind.Headset : DeviceKind.Speakers;
+
+        foreach (SessionClass cls in SessionClasses.All)
+        {
+            var target = EqPreset.ForDevice(_eqPreset.GetValueOrDefault(cls), kind);
+            if (target is not null) ApplyPreset(cls, target);
+        }
+    }
+
+    /// <summary>Load a preset's curve into a bus's bands and push it to the engine.</summary>
+    private void ApplyPreset(SessionClass profile, EqPreset preset)
+    {
+        _applyingPreset = true;   // these are our writes, not the user hand-editing a band
+        var bands = _eqBands[profile];
+        for (int i = 0; i < bands.Count; i++)
+            bands[i].GainDb = preset.Gains[i];
+        _applyingPreset = false;
+
+        _eqPreset[profile] = preset.Name;
+        PersistAndApply(profile);
+
+        if (profile == _editingProfile)
+        {
+            _suppressPresetEvent = true;
+            EqPresetCombo.SelectedItem = preset;
+            _suppressPresetEvent = false;
+        }
     }
 
     /// <summary>A bus is only worth tapping when it actually shapes the sound; a flat curve would
@@ -346,8 +392,9 @@ public partial class MainWindow : Window
     {
         var enabled = EqEnabledCheck.IsChecked == true;
         var gains = _eqBands[profile].Select(b => b.GainDb).ToArray();
-        _prefs.SaveEq(profile, gains, enabled, _eqPreset.GetValueOrDefault(profile));
-        _engine.SetEq(profile, gains, enabled);
+        var preset = _eqPreset.GetValueOrDefault(profile);
+        _prefs.SaveEq(profile, gains, enabled, preset);
+        _engine.SetEq(profile, gains, enabled, EqPreset.PreampFor(preset));
         RefreshTappedBuses(); // a curve going flat/non-flat moves the bus off/onto the tap path
         UpdateEqStatus();
     }
@@ -356,7 +403,8 @@ public partial class MainWindow : Window
     {
         var enabled = EqEnabledCheck.IsChecked == true;
         foreach (SessionClass cls in SessionClasses.All)
-            _engine.SetEq(cls, [.. _eqBands[cls].Select(b => b.GainDb)], enabled);
+            _engine.SetEq(cls, [.. _eqBands[cls].Select(b => b.GainDb)], enabled,
+                EqPreset.PreampFor(_eqPreset.GetValueOrDefault(cls)));
     }
 
     private void UpdateEqStatus()
@@ -405,15 +453,7 @@ public partial class MainWindow : Window
     private void EqPresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressPresetEvent || EqPresetCombo.SelectedItem is not EqPreset preset) return;
-
-        _applyingPreset = true;
-        var bands = _eqBands[_editingProfile];
-        for (int i = 0; i < bands.Count; i++)
-            bands[i].GainDb = preset.Gains[i];
-        _applyingPreset = false;
-
-        _eqPreset[_editingProfile] = preset.Name;
-        PersistAndApply(_editingProfile);
+        ApplyPreset(_editingProfile, preset);
     }
 
     private void EqEnabledCheck_Changed(object sender, RoutedEventArgs e)
