@@ -9,6 +9,17 @@ public sealed class ChatMixEventArgs(int gamePercent, int chatPercent) : EventAr
 }
 
 /// <summary>
+/// <paramref name="IsInitial"/> marks the first reading after launch -- the state the headset was
+/// already in, as opposed to the user reaching for the power button. Only the latter is an
+/// expression of intent strong enough to override a device the user picked by hand.
+/// </summary>
+public sealed class HeadsetPowerEventArgs(bool online, bool isInitial) : EventArgs
+{
+    public bool Online { get; } = online;
+    public bool IsInitial { get; } = isInitial;
+}
+
+/// <summary>
 /// Reads the ChatMix dial position from a SteelSeries Arctis Nova Pro base station.
 /// Protocol reverse-engineered against firmware 0130: MI_04&amp;COL02, report ID 0x07,
 /// byte layout [07][45][game 0-100][chat 0-100].
@@ -20,6 +31,9 @@ public sealed class HidChatMixListener : IDisposable
     private const byte ChatMixParam = 0x45;
     private const byte OutReportId = 0x06;
     private const byte EnableChatMixParam = 0x49;
+    private const byte StatusParam = 0xB0;
+    private const int HeadsetStateByte = 6;
+    private const byte HeadsetConnected = 0x02;
 
     private CancellationTokenSource? _cts;
     private Thread? _loop;
@@ -28,6 +42,30 @@ public sealed class HidChatMixListener : IDisposable
 
     /// <summary>Raised with the raw report whenever the base station sends a non-ChatMix status report.</summary>
     public event EventHandler<byte[]>? StatusReport;
+
+    /// <summary>
+    /// True once the base station's dial is actually being read, false while it's absent. The read
+    /// loop retries a missing device forever and quietly, so without this nothing upstream can tell
+    /// "dial sitting at centre" from "no dial here at all" -- and those need to look different: the
+    /// UI has no honest reading to show, and the last dial position must not stay applied to the
+    /// mix after the hardware that set it is gone.
+    /// </summary>
+    public event EventHandler<bool>? DialConnectedChanged;
+
+    /// <summary>Headset power state, from the solicited 0xB0 status reply. Unlike the pushed 0xB5
+    /// report this is answerable on demand, so it is known at startup rather than only after the
+    /// user next touches the power button.</summary>
+    public event EventHandler<HeadsetPowerEventArgs>? HeadsetOnlineChanged;
+
+    private bool? _headsetOnline;
+    private bool _dialConnected;
+
+    private void SetDialConnected(bool connected)
+    {
+        if (_dialConnected == connected) return;
+        _dialConnected = connected;
+        DialConnectedChanged?.Invoke(this, connected);
+    }
 
     public void Start()
     {
@@ -56,6 +94,7 @@ public sealed class HidChatMixListener : IDisposable
             if (dev is null)
             {
                 // Headset/base station not present; back off and retry.
+                SetDialConnected(false);
                 Thread.Sleep(2000);
                 continue;
             }
@@ -70,9 +109,17 @@ public sealed class HidChatMixListener : IDisposable
             HidStream? outStream = null;
             var outDev = FindDevice("col01");
 
+            Thread? statusReader = null;
             try
             {
                 if (outDev is not null) { try { outStream = outDev.Open(); } catch { } }
+
+                if (outStream is not null)
+                {
+                    statusReader = new Thread(() => ReadStatusLoop(outStream, token), maxStackSize: 128 * 1024)
+                    { IsBackground = true, Name = "hid-status" };
+                    statusReader.Start();
+                }
 
                 using var stream = dev.Open();
                 // Widened from 500ms: also measured directly -- HidStream.Read() leaks a smaller
@@ -82,6 +129,7 @@ public sealed class HidChatMixListener : IDisposable
                 // quickly; it only changes how soon a *timeout* retries.
                 stream.ReadTimeout = 2000;
                 SendEnableChatMix(outDev, outStream);
+                SetDialConnected(true);
                 var buf = new byte[dev.GetMaxInputReportLength() + 1];
                 var lastKeepAlive = DateTime.UtcNow;
                 var lastProbe = DateTime.MinValue;
@@ -125,9 +173,63 @@ public sealed class HidChatMixListener : IDisposable
             }
             finally
             {
+                SetDialConnected(false);
+                // Next connection re-reports whatever it finds, as an initial reading rather than a
+                // transition -- the base station going away is not the user pressing power.
+                _headsetOnline = null;
                 outStream?.Dispose();
             }
         }
+    }
+
+    /// <summary>
+    /// Reads the base station's replies to the periodic 0xB0 status probe, which is the only way to
+    /// learn the headset's power state without waiting for it to change.
+    ///
+    /// The replies come back on col01 -- the interface we *write* commands to -- not col02, which is
+    /// the only one the main loop reads. That mismatch is why the power state used to be unknowable
+    /// at startup: the 0xB5 report is pushed on a power *transition* only, so a headset that was
+    /// already on when SonarLite launched announced nothing, HeadsetOnline stayed false, and the mix
+    /// went to the speakers until the headset was power-cycled. The probe was already being sent all
+    /// along; nobody was listening to the answer.
+    ///
+    /// Frame captured live across a power cycle (report 0x06, param 0xB0):
+    ///   on:  06 B0 00 00 01 00 [02] 08 08 00 02 0A 04 00 08 08 ...
+    ///   off: 06 B0 00 00 01 00 [00] 08 08 00 02 0A 04 00 04 01 ...
+    /// Byte 6 is the headset's connection state. Bytes 14/15 move with it (08 08 on, 04 01 off),
+    /// matching the 0x08/0x04 semantics of the pushed 0xB5 report, but byte 6 is the clean flag.
+    /// </summary>
+    private void ReadStatusLoop(HidStream stream, CancellationToken token)
+    {
+        try
+        {
+            stream.ReadTimeout = 1000;
+            // Sized from the observed 64-byte reply, NOT from col01's GetMaxInputReportLength():
+            // col01 is the *output* collection, so it reports a tiny (often zero) input length, and
+            // reading a 64-byte frame into a buffer cut to that throws -- which silently killed this
+            // loop and took the headset's power state with it.
+            var buf = new byte[Math.Max(64, stream.Device.GetMaxInputReportLength())];
+
+            while (!token.IsCancellationRequested)
+            {
+                int n;
+                try { n = stream.Read(buf); }
+                catch (TimeoutException) { continue; }
+                catch { break; }   // stream torn down under us; the outer loop re-establishes it
+
+                if (n <= HeadsetStateByte || buf[0] != OutReportId || buf[1] != StatusParam) continue;
+                SetHeadsetOnline(buf[HeadsetStateByte] == HeadsetConnected);
+            }
+        }
+        catch { /* the outer loop owns recovery */ }
+    }
+
+    private void SetHeadsetOnline(bool online)
+    {
+        if (_headsetOnline == online) return;
+        bool first = _headsetOnline is null;
+        _headsetOnline = online;
+        HeadsetOnlineChanged?.Invoke(this, new HeadsetPowerEventArgs(online, first));
     }
 
     private static HidDevice? FindDevice(string collection) =>

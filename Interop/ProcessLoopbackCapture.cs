@@ -61,16 +61,54 @@ public sealed class ProcessLoopbackCapture : IDisposable
         _thread.Start();
     }
 
+    /// <summary>
+    /// Keeps re-establishing the tap until cancelled, rather than dying on the first failure.
+    ///
+    /// A single-shot activation is silently fatal here. Everything in this method runs on the
+    /// capture's own thread, so a failure cannot reach AudioEngine.AddTapLocked's catch -- the tap
+    /// stays registered in bus.Taps with its buffer wired into the mixer, producing nothing forever,
+    /// and SyncAll only ever *adds* taps for pids it doesn't already hold, so the corpse is never
+    /// replaced. The app sits routed to the silent cable, listed and "active", with no audio.
+    ///
+    /// Restarting the engine (any output-device switch) is precisely the case that provokes it: every
+    /// capture is disposed and a fresh one is activated for the same pid a moment later, racing the
+    /// OS's teardown of the stream we just closed. Retrying costs nothing when activation succeeds
+    /// first time, and is the difference between a transient race and permanent silence when it
+    /// doesn't.
+    /// </summary>
     private void Run()
+    {
+        int failures = 0;
+        while (!_cts.IsCancellationRequested)
+        {
+            if (RunSession()) failures = 0;   // reached the streaming loop; a later exit is a fresh problem
+            if (_cts.IsCancellationRequested) break;
+
+            failures++;
+            // Ramp 250ms -> 2s. A pid that has genuinely gone away keeps failing until its tap is
+            // removed, so this must not spin. Slept in slices against IsCancellationRequested rather
+            // than waiting on _cts.Token.WaitHandle: Dispose can run while Activate() is still inside
+            // its 5s wait, past the 2s join, and touching the token's handle after that throws
+            // ObjectDisposedException -- on a background thread, which takes the process down.
+            int backoffMs = Math.Min(2000, 250 * failures);
+            for (int slept = 0; slept < backoffMs && !_cts.IsCancellationRequested; slept += 100)
+                Thread.Sleep(100);
+        }
+    }
+
+    /// <summary>Activate and stream until cancelled or the stream breaks. True if it got as far as
+    /// actually streaming, false if activation itself failed.</summary>
+    private bool RunSession()
     {
         IntPtr hEvent = IntPtr.Zero;
         IAudioClientLite? client = null;
         IAudioCaptureClientLite? capture = null;
+        bool streamed = false;
 
         try
         {
             client = Activate();
-            if (client is null) return;
+            if (client is null) return false;
 
             uint flags = (uint)(StreamFlagsLoopback | StreamFlagsEventCallback)
                        | StreamFlagsAutoConvertPcm | StreamFlagsSrcDefaultQuality;
@@ -86,6 +124,8 @@ public sealed class ProcessLoopbackCapture : IDisposable
             capture = (IAudioCaptureClientLite)captureObj;
 
             Marshal.ThrowExceptionForHR(client.Start());
+            streamed = true;
+            Error = null;
 
             var buffer = new byte[WaveFormat.AverageBytesPerSecond / 4];
             int blockAlign = WaveFormat.BlockAlign;
@@ -127,6 +167,8 @@ public sealed class ProcessLoopbackCapture : IDisposable
             if (client is not null) Marshal.FinalReleaseComObject(client);
             if (hEvent != IntPtr.Zero) CloseHandle(hEvent);
         }
+
+        return streamed;
     }
 
     private IAudioClientLite? Activate()

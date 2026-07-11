@@ -126,6 +126,8 @@ public partial class MainWindow : Window
 
         _hid.ChatMixChanged += OnChatMixChanged;
         _hid.StatusReport += OnHidStatus;
+        _hid.DialConnectedChanged += OnDialConnectedChanged;
+        _hid.HeadsetOnlineChanged += OnHeadsetPower;
         _hid.Start();
 
         // Image.Source="SonarLite.ico" picks the smallest embedded frame (16x16) and upscales it
@@ -407,6 +409,11 @@ public partial class MainWindow : Window
                 EqPreset.PreampFor(_eqPreset.GetValueOrDefault(cls)));
     }
 
+    /// <summary>
+    /// Only speaks up when something is actually wrong. Narrating the healthy states ("EQ live
+    /// on...", "Ready...") told the user what they can already see from the curves and the meters,
+    /// and a status line that's always populated is one nobody reads when it finally matters.
+    /// </summary>
     private void UpdateEqStatus()
     {
         string text;
@@ -416,12 +423,13 @@ public partial class MainWindow : Window
             text = "VB-Cable not found. Install VB-Audio Virtual Cable to enable per-app EQ.";
         else if (!_engine.IsRunning)
             text = $"Audio engine inactive — {_engine.Status}";
-        else if (_audio.TappedBuses.Count == 0)
-            text = "Ready. Curves are flat, so audio plays direct with no added latency.";
         else
-            text = $"EQ live on {string.Join(", ", _audio.TappedBuses.OrderBy(b => b))} — {_engine.TapCount} app(s) tapped.";
+            text = "";
 
         if (EqStatusLabel.Text != text) EqStatusLabel.Text = text;
+        // Collapse rather than blank, so a healthy app doesn't keep an empty row's worth of padding.
+        var want = text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        if (EqStatusLabel.Visibility != want) EqStatusLabel.Visibility = want;
     }
 
     private void EqProfile_Checked(object sender, RoutedEventArgs e)
@@ -641,6 +649,41 @@ public partial class MainWindow : Window
 
     // --- ChatMix dial ---
 
+    /// <summary>
+    /// The ChatMix card is a readout of a physical dial, so it only exists while there's a dial to
+    /// read -- otherwise the bar sits at whatever it was last told, which reads as a broken control
+    /// rather than as "no hardware".
+    ///
+    /// Losing the dial also has to release its grip on the mix. The last reported position stays
+    /// applied to the bus gains, and the dial can legitimately report a bus at 0% (turned fully to
+    /// the other side); if the base station then goes away at that moment, that bus would stay
+    /// silent with nothing left in the UI to explain it or turn it back up.
+    /// </summary>
+    private void OnDialConnectedChanged(object? sender, bool connected)
+    {
+        _dialConnected = connected;
+        Dispatcher.Invoke(UpdateChatMixVisibility);
+    }
+
+    private bool _dialConnected;
+
+    /// <summary>
+    /// The dial lives on the base station, which stays plugged in with the headset powered off --
+    /// so "HID device present" is not the same question as "is there a ChatMix to show". A dial
+    /// nobody is listening through has no reading worth displaying, so both have to be true.
+    /// </summary>
+    private void UpdateChatMixVisibility()
+    {
+        bool live = _dialConnected && _audio.HeadsetOnline;
+        ChatMixCard.Visibility = live ? Visibility.Visible : Visibility.Collapsed;
+        if (live) return;
+
+        _lastChatPercent = 100;
+        _lastGamePercent = 100;
+        ChatMixSlider.Value = 50;
+        ApplyAllBusGains();
+    }
+
     private void OnChatMixChanged(object? sender, ChatMixEventArgs e)
     {
         Dispatcher.Invoke(() =>
@@ -671,19 +714,37 @@ public partial class MainWindow : Window
     {
         if (report.Length < 5 || report[1] != 0xB5) return;
         bool? online = report[4] switch { 0x08 => true, 0x04 => false, _ => null };
-        if (online is null || online == _audio.HeadsetOnline) return;
+        if (online is null) return;
+        // The pushed 0xB5 report is the fast path on a transition; the polled 0xB0 status is the
+        // source of truth (it also answers at startup). Both land here.
+        Dispatcher.Invoke(() => ApplyHeadsetPower(online.Value, isInitial: false));
+    }
 
-        Dispatcher.Invoke(() =>
+    private void OnHeadsetPower(object? sender, HeadsetPowerEventArgs e) =>
+        Dispatcher.Invoke(() => ApplyHeadsetPower(e.Online, e.IsInitial));
+
+    /// <summary>
+    /// <paramref name="isInitial"/> distinguishes "this is the state the headset was already in when
+    /// we looked" from "the user just pressed the power button". Only the latter clears a hand-picked
+    /// device: reaching for the power button is a newer statement of intent than an earlier click,
+    /// but merely *observing* a powered-on headset at launch is not, and must not silently discard a
+    /// device the user deliberately chose last session.
+    /// </summary>
+    private void ApplyHeadsetPower(bool online, bool isInitial)
+    {
+        if (online == _audio.HeadsetOnline && !isInitial) return;
+
+        _audio.HeadsetOnline = online;
+        if (!isInitial)
         {
-            _audio.HeadsetOnline = online.Value;
-            // Reaching for the power button overrules whatever they clicked earlier.
             _userPick = null;
-            StatusLabel.Text = _audio.HeadsetOnline ? "Headset powered on." : "Headset powered off — falling back.";
-            // Re-rank under the new power state and move the audio to match. When the headset is
-            // coming back its endpoint may not have reappeared yet, in which case this does nothing
-            // and the refresh triggered by the endpoint showing up is what performs the switch.
-            RefreshDeviceLists();
-        });
+            StatusLabel.Text = online ? "Headset powered on." : "Headset powered off — falling back.";
+        }
+        UpdateChatMixVisibility();  // a dial nobody is wearing isn't worth showing
+        // Re-rank under the new power state and move the audio to match. When the headset is coming
+        // back its endpoint may not have reappeared yet, in which case this does nothing and the
+        // refresh triggered by the endpoint showing up is what performs the switch.
+        RefreshDeviceLists();
     }
 
     // --- Tile drag & drop ---
