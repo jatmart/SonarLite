@@ -1,12 +1,23 @@
 # SonarLite
 
-SteelSeries GG's **Sonar** mixer does the same job — per-app audio routing, per-bus EQ, a
-ChatMix dial — inside an Electron app that idles at several hundred MB of RAM and drags a
-background service tray with it. SonarLite is a from-scratch rewrite of just that mixer, built
-because a tray-resident audio utility has no business costing that much memory. It's a native
-WPF app that idles under 50 MB:
+SonarLite is a from-scratch rewrite of SteelSeries GG's **Sonar** mixer — without the rest of GG
+riding along with it. Same job (per-app audio routing, independent per-bus EQ, the ChatMix
+dial), minus the Electron shell and background services that keep GG idling at several hundred
+MB of RAM. SonarLite is a native WPF app that idles under 50 MB — often a tenth of what GG costs
+you for the same feature set:
 
 ![SonarLite using 32.4 MB of RAM in Task Manager](docs/memory-usage.png)
+
+## Features
+
+![SonarLite's mixer window: per-app routing into Game/Chat/Media buses, a 10-band EQ per bus, and a live ChatMix dial](docs/screenshot.png)
+
+- **Per-app routing** — drag any running app into a Game, Chat, or Media bus
+- **Independent 10-band EQ per bus**, with presets (shown above: Immersive)
+- **Live ChatMix dial** — read straight from the headset's hardware wheel, or drag it in-app
+- **Per-bus volume and mute**, on top of each app's own level
+- **Playback + microphone device pickers**, with automatic headset switching
+- **Start with Windows**, tray-resident, no visible window until you open it
 
 **This app is built specifically for the SteelSeries Arctis Nova Pro** — the ChatMix dial and
 auto-switching talk to that headset's base station directly over USB HID, and won't recognize
