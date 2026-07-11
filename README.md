@@ -54,19 +54,6 @@ without Equalizer APO never touches that code path at all.)
 4. Plug in your Arctis Nova Pro — the ChatMix dial and auto-switching pick it up automatically,
    no extra configuration needed.
 
-## Building from source
-
-Only needed if you're modifying the code — most people should use the [Releases](https://github.com/jatmart/SonarLite/releases)
-zip instead. Requires the .NET 8 SDK (not just the runtime from step 2 above):
-
-```
-dotnet build SonarLite.csproj -c Release
-```
-
-Or open in Visual Studio 2022+ and build normally. This produces `SonarLite.exe` under
-`bin\Release\net8.0-windows\` — run that directly, or re-run the build command any time you
-change source and want to see the change take effect.
-
 ## Status
 
 Actively developed, single-maintainer hobby project. Expect rough edges.
