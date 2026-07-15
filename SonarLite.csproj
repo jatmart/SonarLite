@@ -17,6 +17,14 @@
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <TieredPGO>true</TieredPGO>
+
+    <!-- Precompile our own assembly to native so the logon-cold launch spends less time in the JIT.
+         Measured on a clean win-x64 publish: cold first launch 906ms -> 719ms (~20% off), warm runs
+         ~unchanged, for +167KB on SonarLite.dll. Only the app's assembly is affected because
+         framework-dependent means WPF/.NET are already R2R in the shared runtime. IMPORTANT: this
+         only takes effect on a `dotnet publish -r win-x64`; a plain `dotnet build` ignores it and
+         emits the same IL-only exe, so the shipped Release must be a publish, not a build. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
   </PropertyGroup>
 
   <ItemGroup>

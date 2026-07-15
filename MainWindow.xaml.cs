@@ -46,6 +46,8 @@ public partial class MainWindow : Window
 
     private TrayIcon? _trayIcon;
     private System.Windows.Controls.ContextMenu? _trayMenu;
+    private readonly bool _startInTray =
+        Environment.GetCommandLineArgs().Contains(AutostartService.TrayArg, StringComparer.OrdinalIgnoreCase);
     private bool _isExiting;
     private System.Windows.Point _dragStart;
     private AppSession? _dragSession;
@@ -83,6 +85,10 @@ public partial class MainWindow : Window
         _suppressAutostartEvent = true;
         AutostartCheck.IsChecked = AutostartService.IsEnabled();
         _suppressAutostartEvent = false;
+
+        // Bring older installs (Run value written before the tray flag existed) up to date so their
+        // next logon launch also parks in the tray. Only touches the value when autostart is on.
+        if (AutostartCheck.IsChecked == true) AutostartService.EnsureTrayFlag();
 
         // Session state changes push through immediately (see AudioSessionService.SessionsChanged),
         // and AudioSessionService.RouteFor triggers its own targeted rescan the instant we retarget
@@ -900,6 +906,20 @@ public partial class MainWindow : Window
         {
             _trayMenu.IsOpen = true;
         };
+    }
+
+    /// <summary>
+    /// Fires after the HWND exists but before the window is shown/painted, so hiding here parks a
+    /// logon-launched instance straight in the tray with no visible flash. Handled at this point
+    /// rather than in the ctor because Hide() needs the window source to exist, and rather than on
+    /// Loaded because Loaded runs after the first render (which is the flash we're avoiding).
+    /// </summary>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        if (!_startInTray) return;
+        WindowState = WindowState.Minimized; // so a later restore behaves exactly like any tray reopen
+        Hide();
     }
 
     private void ShowFromTray()
