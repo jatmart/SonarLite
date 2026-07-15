@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     The one correct way to refresh SonarLite so the exe you run, the logon-autostart target, and
-    (optionally) the GitHub repo are always the same version.
+    (optionally) the GitHub repo + a full GitHub Release are always the same version.
 
 .DESCRIPTION
     Publishes a ReadyToRun (R2R) build straight into the canonical run folder
@@ -14,13 +14,23 @@
     script, never a bare build.
 
 .PARAMETER Push
-    Also commit any pending changes and push to origin, so GitHub lands on the same version too.
+    Also commit any pending changes and push to origin, so GitHub is on the same version too.
 
 .PARAMETER Message
-    Commit message used by -Push when there are pending changes. Default: "chore: sync build".
+    Commit message used by -Push/-Release when there are pending changes.
+    Default: "chore: sync build" (or "release: vX.Y.Z" when -Release is given).
 
 .PARAMETER Tray
     Relaunch minimized to the tray (exactly like the logon launch) instead of showing the window.
+
+.PARAMETER Release
+    Cut a full release: stamp <Version> in the csproj to this number, publish, commit, push, create
+    and push tag vX.Y.Z, zip the build, and publish a GitHub Release with the zip attached. Accepts
+    "0.3.1" or "v0.3.1". Implies -Push.
+
+.PARAMETER Notes
+    Release notes body for -Release. Default: a changelog auto-generated from the commit subjects
+    since the previous tag, plus an install blurb.
 
 .EXAMPLE
     .\publish.ps1
@@ -28,13 +38,19 @@
 
 .EXAMPLE
     .\publish.ps1 -Push -Message "feat: add loudness meter"
-    Same, then commit everything with that message and push -- running exe == autostart == GitHub.
+    Same, then commit everything with that message and push.
+
+.EXAMPLE
+    .\publish.ps1 -Release 0.3.1
+    Full release: bump to 0.3.1, build, commit, push, tag v0.3.1, and publish the GitHub Release.
 #>
 [CmdletBinding()]
 param(
     [switch]$Push,
     [string]$Message = "chore: sync build",
-    [switch]$Tray
+    [switch]$Tray,
+    [string]$Release,
+    [string]$Notes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +59,33 @@ $proj   = Join-Path $root 'SonarLite.csproj'
 $outDir = Join-Path $root 'bin\Release\net8.0-windows'
 $exe    = Join-Path $outDir 'SonarLite.exe'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+
+$doRelease = -not [string]::IsNullOrWhiteSpace($Release)
+$tag = $null
+
+# --- Release preamble: validate version, stamp csproj, prepare notes -------------------------
+if ($doRelease) {
+    $ver = $Release.TrimStart('v', 'V')
+    if ($ver -notmatch '^\d+\.\d+\.\d+$') { throw "Release version must look like X.Y.Z (got '$Release')." }
+    $tag = "v$ver"
+
+    Push-Location $root
+    try {
+        git rev-parse -q --verify "refs/tags/$tag" *> $null
+        if ($LASTEXITCODE -eq 0) { throw "Tag $tag already exists -- pick a new version." }
+        $prevTag = (git tag --sort=-v:refname | Select-Object -First 1)
+    } finally { Pop-Location }
+
+    $Push = $true
+    if (-not $PSBoundParameters.ContainsKey('Message')) { $Message = "release: $tag" }
+
+    # Stamp <Version> in the csproj (UTF-8, no BOM) so the exe self-reports this version.
+    $csprojText = [System.IO.File]::ReadAllText($proj)
+    if ($csprojText -notmatch '<Version>.*?</Version>') { throw "No <Version> element in $proj to update." }
+    $csprojText = [regex]::Replace($csprojText, '<Version>.*?</Version>', "<Version>$ver</Version>")
+    [System.IO.File]::WriteAllText($proj, $csprojText)
+    Write-Host "==> Stamped <Version> = $ver" -ForegroundColor Cyan
+}
 
 Write-Host "==> Stopping any running SonarLite..." -ForegroundColor Cyan
 Get-Process SonarLite -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -85,6 +128,46 @@ if ($Push) {
     } finally { Pop-Location }
 }
 
+# --- Release finale: tag, zip, publish GitHub Release (app is still stopped so files aren't locked) ---
+if ($doRelease) {
+    Push-Location $root
+    try {
+        Write-Host "==> Tagging $tag..." -ForegroundColor Cyan
+        git tag -a $tag -m "SonarLite $tag"
+        if ($LASTEXITCODE -ne 0) { throw "git tag failed." }
+        git push origin $tag
+        if ($LASTEXITCODE -ne 0) { throw "git push tag failed." }
+
+        Write-Host "==> Zipping build..." -ForegroundColor Cyan
+        $zip = Join-Path $root ("bin\SonarLite-$tag-win-x64.zip")   # under bin\ (gitignored)
+        if (Test-Path $zip) { Remove-Item $zip -Force }
+        $files = Get-ChildItem $outDir -File | Where-Object { $_.Extension -ne '.pdb' }  # ship no debug symbols
+        Compress-Archive -Path $files.FullName -DestinationPath $zip
+        Write-Host ("    {0:N0} KB, {1} files" -f ((Get-Item $zip).Length / 1KB), $files.Count) -ForegroundColor Green
+
+        if (-not $PSBoundParameters.ContainsKey('Notes')) {
+            if ([string]::IsNullOrEmpty($prevTag)) { $range = 'HEAD' } else { $range = "$prevTag..HEAD" }
+            $changelog = (git log $range --no-merges --pretty=format:"- %s") -join "`n"
+            if ([string]::IsNullOrWhiteSpace($changelog)) { $changelog = "- Maintenance release." }
+            $Notes = @"
+## What's new
+$changelog
+
+## Install
+Requires the **.NET 8 Desktop Runtime** (win-x64). Download ``SonarLite-$tag-win-x64.zip``, extract, and run ``SonarLite.exe``. Use the in-app **Start with Windows** checkbox to enable autostart.
+"@
+        }
+
+        Write-Host "==> Creating GitHub Release $tag..." -ForegroundColor Cyan
+        $notesFile = Join-Path $env:TEMP "sonarlite-release-notes-$tag.md"
+        [System.IO.File]::WriteAllText($notesFile, $Notes)
+        try {
+            gh release create $tag "$zip#SonarLite $tag (win-x64)" --title "SonarLite $tag" --notes-file $notesFile
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed (is gh installed and authenticated?)." }
+        } finally { Remove-Item $notesFile -Force -ErrorAction SilentlyContinue }
+    } finally { Pop-Location }
+}
+
 Write-Host "==> Relaunching..." -ForegroundColor Cyan
 if ($Tray) { Start-Process $exe -ArgumentList '--tray' } else { Start-Process $exe }
 
@@ -95,3 +178,4 @@ Write-Host ""
 Write-Host "Done. Running R2R build from:" -ForegroundColor Green
 Write-Host "  $exe"
 Write-Host "  git HEAD: $sha"
+if ($doRelease) { Write-Host "  released: $tag -> $(git -C $root remote get-url origin)" -ForegroundColor Green }
