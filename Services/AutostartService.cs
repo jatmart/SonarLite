@@ -18,6 +18,10 @@ internal static class AutostartService
     private const string SerializePath = @"Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize";
     private const string ValueName = "SonarLite";
 
+    /// <summary>Passed only on the Windows-logon launch so that instance parks straight in the tray;
+    /// a manual double-click of the exe has no arg and opens the window as usual. See App.OnStartup.</summary>
+    public const string TrayArg = "--tray";
+
     public static bool IsEnabled()
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
@@ -31,13 +35,31 @@ internal static class AutostartService
         if (enabled)
         {
             var exePath = Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0];
-            key.SetValue(ValueName, $"\"{exePath}\"");
+            key.SetValue(ValueName, $"\"{exePath}\" {TrayArg}");
             DisableStartupDelay();
         }
         else
         {
             key.DeleteValue(ValueName, throwOnMissingValue: false);
         }
+    }
+
+    /// <summary>
+    /// One-time upgrade for installs whose Run value predates the tray flag: append <see
+    /// cref="TrayArg"/> without touching the stored exe path. Rewriting the whole value here would
+    /// silently repoint autostart at whichever build is currently running (see MainWindow's ctor
+    /// comment), so this appends the flag to the existing command verbatim and leaves the path alone.
+    /// </summary>
+    public static void EnsureTrayFlag()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
+            if (key?.GetValue(ValueName) is not string cmd) return;
+            if (cmd.Contains(TrayArg, StringComparison.OrdinalIgnoreCase)) return;
+            key.SetValue(ValueName, $"{cmd} {TrayArg}");
+        }
+        catch { /* autostart still works without the flag; it just opens the window on logon */ }
     }
 
     /// <summary>
