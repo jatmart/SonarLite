@@ -466,10 +466,28 @@ public sealed class AudioSessionService : IDisposable
     /// </summary>
     public bool HeadsetOnline { get; set; }
 
+    /// <summary>
+    /// The playback device the user picked by hand (MainWindow's _userPick, mirrored here), or null.
+    /// The engine's render-target resolution has to see this: SonarLite's own per-app routing makes
+    /// tapped apps report the *cable* as the system default, so once the engine (re)starts,
+    /// <see cref="ResolveRealDefaultDevice"/> can no longer trust Windows' default to reflect the
+    /// user's choice -- it would fall through to ranking and (with a powered-on headset now ranked
+    /// -1) drag output back onto the headset, silently defeating a manual pick of the speakers. An
+    /// explicit pick outranks even the online headset until a power transition clears it, exactly as
+    /// MainWindow's own PreferredOutput already treats it.
+    /// </summary>
+    public string? ManualOutputOverride { get; set; }
+
     public static bool IsHeadset(string name) => name.Contains("Arctis", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>False for a headset that's powered off -- never a legal render target.</summary>
     public bool IsUsableOutput(string name) => HeadsetOnline || !IsHeadset(name);
+
+    /// <summary>Same rule for capture: a powered-off headset's mic endpoint stays present on USB but
+    /// is dead, so it is never a legal recording target either. Named separately from
+    /// <see cref="IsUsableOutput"/> so mic-side call sites read honestly, though the test is identical
+    /// -- headset power gates both directions the same way.</summary>
+    public bool IsUsableInput(string name) => IsUsableOutput(name);
 
     /// <summary>
     /// How much the user wants their audio to come out of this device; lower wins, int.MaxValue
@@ -480,11 +498,26 @@ public sealed class AudioSessionService : IDisposable
     /// different device from the one the mix is actually coming out of (the two used to rank
     /// candidates by separate, quietly diverging rules, and did exactly that).
     /// </summary>
-    public int PreferenceRank(string id, string name)
+    public int PreferenceRank(string id, string name) => Rank(id, name, _prefs.PlaybackPriority);
+
+    /// <summary>The recording-side twin of <see cref="PreferenceRank"/>, keyed off the separate
+    /// RecordingPriority list. Lets the default microphone follow the same failover rules the
+    /// speakers already do -- the headset's mic when it's powered on, the top-ranked fallback mic
+    /// when it isn't.</summary>
+    public int RecordingPreferenceRank(string id, string name) => Rank(id, name, _prefs.RecordingPriority);
+
+    /// <summary>
+    /// The powered-on-headset check has to come *before* the "not in the priority list" bail-out:
+    /// powering the headset on is itself the statement of intent, so it must win even when the user
+    /// has never hand-picked it (a fresh profile, or one where only the speakers were ever picked).
+    /// The old order returned int.MaxValue for an unranked headset first, which is exactly why an
+    /// Arctis that was already on at launch was filtered out and the mix defaulted to the speakers.
+    /// </summary>
+    private int Rank(string id, string name, List<string> priority)
     {
-        int i = _prefs.PlaybackPriority.IndexOf(id);
-        if (i < 0) return int.MaxValue;
-        return IsHeadset(name) && HeadsetOnline ? -1 : i;
+        if (IsHeadset(name) && HeadsetOnline) return -1;
+        int i = priority.IndexOf(id);
+        return i < 0 ? int.MaxValue : i;
     }
 
     /// <summary>
@@ -503,6 +536,22 @@ public sealed class AudioSessionService : IDisposable
     /// </summary>
     public MMDevice? ResolveRealDefaultDevice()
     {
+        // A hand-picked device wins outright, ahead of Windows' own default: while SonarLite is
+        // routing tapped apps into the cable, Windows reports the cable as the default, so trusting
+        // that default here would throw the user's pick away on the next (re)start. Only honoured
+        // while it's actually a live, usable endpoint -- a powered-off headset or a vanished device
+        // falls through to the normal resolution below.
+        if (ManualOutputOverride is not null && ManualOutputOverride != NullSinkDeviceId)
+        {
+            try
+            {
+                var picked = _enumerator.GetDevice(ManualOutputOverride);
+                if (picked.State == DeviceState.Active && IsUsableOutput(SafeName(picked))) return picked;
+                picked.Dispose();
+            }
+            catch { /* stale id; fall through */ }
+        }
+
         MMDevice raw;
         try { raw = _enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia); }
         catch { return null; }

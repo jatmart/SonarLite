@@ -557,6 +557,8 @@ public partial class MainWindow : Window
         // (speakers on a dock that got unplugged) the preference ranking takes over again.
         if (_userPick is not null && _boundPlayback.All(d => d.Id != _userPick))
             _userPick = null;
+        if (_userRecordingPick is not null && _boundRecording.All(d => d.Id != _userRecordingPick))
+            _userRecordingPick = null;
 
         // Re-evaluated on every refresh, not just when the current device vanishes. The headset
         // powering on can't be handled from the HID report alone: Windows takes a moment to bring the
@@ -565,6 +567,9 @@ public partial class MainWindow : Window
         // notification, so re-deciding here is what actually catches it. What keeps this from
         // stampeding over a manual pick (the original bug) is _userPick, not the absence of a check.
         SwitchToPreferredOutput();
+        // The mic rides the same refreshes: a headset power transition funnels through here, so its
+        // mic follows its speakers instead of being left dead on the powered-off headset.
+        SwitchToPreferredInput();
     }
 
     private static bool SameDevices(List<DeviceOption> a, List<DeviceOption> b) =>
@@ -577,7 +582,23 @@ public partial class MainWindow : Window
     /// the device stops existing. Without this, the refresh raised by the pick itself immediately
     /// re-asserted the headset and cut the speakers dead -- the bug this whole change started from.
     /// </summary>
-    private string? _userPick;
+    private string? _userPickBacking;
+
+    /// <summary>Write-through so the engine's own render-target resolution
+    /// (<see cref="AudioSessionService.ResolveRealDefaultDevice"/>) always sees the same manual pick
+    /// the dropdown does. They used to diverge -- MainWindow honoured _userPick but the engine
+    /// resolved through raw ranking -- which is how a hand-picked speaker got overridden back to the
+    /// headset the moment the engine restarted onto the cable-as-default.</summary>
+    private string? _userPick
+    {
+        get => _userPickBacking;
+        set { _userPickBacking = value; _audio.ManualOutputOverride = value; }
+    }
+
+    /// <summary>The recording twin of <see cref="_userPick"/>: a mic the user picked by hand, which
+    /// outranks the headset's own mic until a headset power transition (a newer statement of intent)
+    /// or the device vanishing clears it.</summary>
+    private string? _userRecordingPick;
 
     /// <summary>
     /// The device the user most wants their audio to come out of, among the ones actually available:
@@ -629,6 +650,62 @@ public partial class MainWindow : Window
         });
     }
 
+    /// <summary>The recording twin of <see cref="PreferredOutput"/>: the mic the user most wants, among
+    /// the ones actually available -- their hand-pick if it's still usable, else the top-ranked
+    /// recording device by <see cref="AudioSessionService.RecordingPreferenceRank"/> (the headset's own
+    /// mic while it's powered on).
+    ///
+    /// <paramref name="allowUnranked"/> is where the mic deliberately diverges from the stricter
+    /// speaker rule. Speakers refuse to move onto a device the user never ranked (grabbing an output
+    /// behind their back is worse than staying put). A mic has no such downside: if the current
+    /// default is a dead endpoint -- the headset mic after the headset powers off -- staying there
+    /// means no microphone at all, which is strictly worse than any working mic. So when the caller
+    /// says the current mic is unusable, fall back to any usable mic rather than returning null.</summary>
+    private DeviceOption? PreferredInput(bool allowUnranked)
+    {
+        var pick = _boundRecording.FirstOrDefault(d => d.Id == _userRecordingPick && _audio.IsUsableInput(d.Name));
+        if (pick is not null) return pick;
+
+        var usable = _boundRecording
+            .Where(d => _audio.IsUsableInput(d.Name))
+            .Select(d => (Device: d, Rank: _audio.RecordingPreferenceRank(d.Id, d.Name)))
+            .OrderBy(x => x.Rank)
+            .ToList();
+
+        // A ranked mic (headset mic while online, or a hand-picked fallback) always wins.
+        var ranked = usable.FirstOrDefault(x => x.Rank != int.MaxValue);
+        if (ranked.Device is not null) return ranked.Device;
+
+        // Nothing ranked is available; only reach for an unranked mic as a last resort off a dead one.
+        return allowUnranked ? usable.Select(x => x.Device).FirstOrDefault() : null;
+    }
+
+    /// <summary>
+    /// The mic-side counterpart of <see cref="SwitchToPreferredOutput"/>: point the default recording
+    /// device at the best available mic. This is the failover the microphone previously lacked -- with
+    /// the headset online its mic wins, and when it powers off (its endpoint lingers on USB but goes
+    /// dead, so Windows won't move off it on its own) the mic drops to a working mic instead of
+    /// silently staying on the dead headset. No engine rebuild is involved: SonarLite only mixes the
+    /// render path, so setting the capture default is the whole job. Safe to call from any refresh --
+    /// it no-ops once the default is already the preferred mic, which is what stops the notification
+    /// our own SetDefaultRecording raises from looping.
+    /// </summary>
+    private void SwitchToPreferredInput()
+    {
+        var currentId = _devices.GetDefaultRecordingId();
+        var current = _boundRecording.FirstOrDefault(d => d.Id == currentId);
+        // A current default that's gone from the list, or a powered-off headset mic, is unusable --
+        // only then may the failover grab a mic the user never ranked. While the current mic is fine,
+        // stay put unless something ranked (the online headset) actively outranks it.
+        bool currentUnusable = current is null || !_audio.IsUsableInput(current.Name);
+
+        var best = PreferredInput(allowUnranked: currentUnusable);
+        if (best is null || best.Id == currentId) return;
+
+        _devices.SetDefaultRecording(best.Id);
+        StatusLabel.Text = $"Switched microphone to {best.Name}.";
+    }
+
     private void PlaybackCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressDeviceEvents) return;
@@ -655,8 +732,14 @@ public partial class MainWindow : Window
     private void RecordingCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressDeviceEvents) return;
-        if (RecordingCombo.SelectedItem is DeviceOption device && device.Id != _devices.GetDefaultRecordingId())
-            _devices.SetDefaultRecording(device.Id);
+        if (RecordingCombo.SelectedItem is not DeviceOption device || device.Id == _devices.GetDefaultRecordingId())
+            return;
+
+        // Mirror the playback pick: remember it as an override and promote it up the recording
+        // fallback list, so this is the mic the failover drops to once the headset powers off.
+        _userRecordingPick = device.Id;
+        _prefs.PromoteRecording(device.Id);
+        _devices.SetDefaultRecording(device.Id);
     }
 
     private void AutostartCheck_Changed(object sender, RoutedEventArgs e)
@@ -756,6 +839,7 @@ public partial class MainWindow : Window
         if (!isInitial)
         {
             _userPick = null;
+            _userRecordingPick = null;   // reaching for the power button overrides a hand-picked mic too
             StatusLabel.Text = online ? "Headset powered on." : "Headset powered off — falling back.";
         }
         UpdateChatMixVisibility();  // a dial nobody is wearing isn't worth showing

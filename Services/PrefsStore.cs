@@ -23,6 +23,7 @@ public sealed class PrefsStore
     public Dictionary<string, string> EqPresets { get; set; } = new();       // profile -> preset name
     public bool EqEnabled { get; set; } = true;
     public List<string> PlaybackPriority { get; set; } = new();
+    public List<string> RecordingPriority { get; set; } = new();
     public Dictionary<string, float> BusVolumes { get; set; } = new();       // bus -> fader 0..1
     public Dictionary<string, bool> BusMuted { get; set; } = new();          // bus -> muted
 
@@ -45,6 +46,16 @@ public sealed class PrefsStore
     {
         PlaybackPriority.Remove(deviceId);
         PlaybackPriority.Insert(0, deviceId);
+        Persist();
+    }
+
+    /// <summary>Recording twin of <see cref="PromotePlayback"/>: a hand-picked microphone becomes the
+    /// new top fallback the mic drops to when the headset (which always outranks it while online)
+    /// powers off.</summary>
+    public void PromoteRecording(string deviceId)
+    {
+        RecordingPriority.Remove(deviceId);
+        RecordingPriority.Insert(0, deviceId);
         Persist();
     }
 
@@ -97,6 +108,7 @@ public sealed class PrefsStore
                     EqPresets = data.EqPresets;
                     EqEnabled = data.EqEnabled;
                     PlaybackPriority = data.PlaybackPriority;
+                    RecordingPriority = data.RecordingPriority;
                     BusVolumes = data.BusVolumes;
                     BusMuted = data.BusMuted;
                 }
@@ -121,6 +133,7 @@ public sealed class PrefsStore
                 EqPresets = EqPresets,
                 EqEnabled = EqEnabled,
                 PlaybackPriority = PlaybackPriority,
+                RecordingPriority = RecordingPriority,
                 BusVolumes = BusVolumes,
                 BusMuted = BusMuted
             };
@@ -140,6 +153,7 @@ public sealed class PrefsStore
         public Dictionary<string, string> EqPresets { get; set; } = new();
         public bool EqEnabled { get; set; } = true;
         public List<string> PlaybackPriority { get; set; } = new();
+        public List<string> RecordingPriority { get; set; } = new();
         public Dictionary<string, float> BusVolumes { get; set; } = new();
         public Dictionary<string, bool> BusMuted { get; set; } = new();
     }

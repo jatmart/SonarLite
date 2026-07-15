@@ -33,7 +33,12 @@ public sealed class HidChatMixListener : IDisposable
     private const byte EnableChatMixParam = 0x49;
     private const byte StatusParam = 0xB0;
     private const int HeadsetStateByte = 6;
-    private const byte HeadsetConnected = 0x02;
+    // Byte 6 of the 0xB0 status reply carries the power flag. Firmware reports 0x08 when the headset
+    // is on -- the same 0x08=on flag the pushed 0xB5 report uses at report[4] (see OnHidStatus).
+    // An earlier capture recorded 0x02, so accept both as "on"; anything else (0x00 or 0x04 when
+    // off) is treated as off. Reading this as a fixed 0x02 was why a headset that was already on at
+    // launch on current firmware was mis-detected as off and the mix defaulted to the speakers.
+    private static bool IsConnectedFlag(byte b) => b is 0x08 or 0x02;
 
     private CancellationTokenSource? _cts;
     private Thread? _loop;
@@ -218,7 +223,7 @@ public sealed class HidChatMixListener : IDisposable
                 catch { break; }   // stream torn down under us; the outer loop re-establishes it
 
                 if (n <= HeadsetStateByte || buf[0] != OutReportId || buf[1] != StatusParam) continue;
-                SetHeadsetOnline(buf[HeadsetStateByte] == HeadsetConnected);
+                SetHeadsetOnline(IsConnectedFlag(buf[HeadsetStateByte]));
             }
         }
         catch { /* the outer loop owns recovery */ }
