@@ -50,7 +50,8 @@ param(
     [string]$Message = "chore: sync build",
     [switch]$Tray,
     [string]$Release,
-    [string]$Notes
+    [string]$Notes,
+    [switch]$IfChanged
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,6 +86,21 @@ if ($doRelease) {
     $csprojText = [regex]::Replace($csprojText, '<Version>.*?</Version>', "<Version>$ver</Version>")
     [System.IO.File]::WriteAllText($proj, $csprojText)
     Write-Host "==> Stamped <Version> = $ver" -ForegroundColor Cyan
+}
+
+# --- Auto-refresh gate (for the Stop hook) ---------------------------------------------------
+# The editor hook calls `-IfChanged` at the end of every turn, but a rebuild+relaunch is only
+# worth its ~dropout when a source file actually changed. Skip fast otherwise so plain Q&A never
+# disturbs the running app. Never gates a real release.
+if ($IfChanged -and -not $doRelease) {
+    $srcMax = (Get-ChildItem $root -Recurse -File -Include *.cs, *.xaml |
+        Where-Object { $_.FullName -notmatch '\\(obj|bin)\\' } |
+        Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
+    $exeTime = if (Test-Path $exe) { (Get-Item $exe).LastWriteTimeUtc } else { [datetime]::MinValue }
+    if ($null -ne $srcMax -and $exeTime -ge $srcMax) {
+        Write-Host "No source changes since last build; nothing to refresh." -ForegroundColor DarkGray
+        exit 0
+    }
 }
 
 Write-Host "==> Stopping any running SonarLite..." -ForegroundColor Cyan
