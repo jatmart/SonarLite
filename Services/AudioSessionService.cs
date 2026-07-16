@@ -524,11 +524,18 @@ public sealed class AudioSessionService : IDisposable
     /// The one real playback device the app should treat as "the default" everywhere it matters --
     /// where AudioEngine renders the mixed output, and where this class watches for brand-new
     /// (not-yet-tapped) apps' sessions -- normally just Windows' own Role.Multimedia default,
-    /// except when that's our own routing cable or a powered-off headset. A tapped app actively
-    /// streaming into the cable can make Windows report the cable itself as "default"; the cable
-    /// isn't a real output device, so rendering to it is silent output and watching it for sessions
-    /// misses every genuinely new app. In either case the real answer is the best candidate by
+    /// except when that's our own routing cable or a powered-off headset. The cable isn't a real
+    /// output device, so rendering to it is silent output and watching it for sessions misses every
+    /// genuinely new app. In either case the real answer is the best candidate by
     /// <see cref="PreferenceRank"/>. Caller owns the returned device.
+    ///
+    /// The cable-as-default case was long blamed on "a tapped app streaming into the cable makes
+    /// Windows report the cable as default", which was wrong. The actual cause was SonarLite holding a
+    /// persisted per-app routing override on its *own* process: that override's whole purpose is to
+    /// redefine what "the default endpoint" resolves to inside the overridden process, so every
+    /// default-device read here returned the cable regardless of the real default. See
+    /// AppRoutingService.ClearSelfRoute. The cable check below is kept as cheap insurance, but it
+    /// should now be unreachable in practice.
     ///
     /// Note this answers "where is the audio going", not "where should it go" -- it deliberately
     /// keeps Windows' default when that's a usable device the user never ranked, rather than

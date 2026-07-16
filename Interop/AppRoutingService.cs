@@ -20,8 +20,49 @@ public sealed class AppRoutingService
 
     public bool IsAvailable => GetFactory() is not null;
 
-    /// <summary>Route a process's playback to the given MMDevice ID, or back to system default when null.</summary>
+    /// <summary>
+    /// Route a process's playback to the given MMDevice ID, or back to system default when null.
+    ///
+    /// Routing SonarLite itself is refused outright. This override doesn't just move a process's
+    /// audio -- it redefines what "the default device" *resolves to* inside that process, which is
+    /// exactly how per-app routing works. Applied to ourselves it silently poisons every
+    /// GetDefaultAudioEndpoint() call we make: SonarLite would see the cable as the system default
+    /// forever, no matter what the real default is, and no matter how many times we set it. Our own
+    /// render path never needed the override anyway (AudioEngine hands WasapiOut an explicit MMDevice),
+    /// so a self-route is all cost and no benefit -- which is why this is a hard refusal at the
+    /// chokepoint rather than a check in the one caller that happened to reach it.
+    /// </summary>
     public bool SetRenderDevice(int processId, string? mmDeviceId)
+    {
+        if (processId == Environment.ProcessId) return false;
+        return SetRenderDeviceCore(processId, mmDeviceId);
+    }
+
+    /// <summary>
+    /// Drop any persisted routing override on SonarLite's own process. Returns true if one was
+    /// actually there to remove.
+    ///
+    /// Windows persists these overrides per *app identity* (the executable), not per pid, so the
+    /// refusal in <see cref="SetRenderDevice"/> only stops us writing a *new* self-route -- one
+    /// written by an earlier build outlives the process that wrote it and every later pid inherits it,
+    /// poisoning that process's view of the default device forever.
+    ///
+    /// Must be called once the process actually has an audio session, not before. Windows only
+    /// associates a live pid with its persisted app identity when that pid has a session, so called
+    /// any earlier this reads back "no override" and clears nothing -- while the override still
+    /// materialises the moment the engine opens its render stream. The clear is issued
+    /// unconditionally for the same reason: the read is only trustworthy after the fact, so gating the
+    /// write on it reintroduces exactly that race.
+    /// </summary>
+    public bool ClearSelfRoute()
+    {
+        int me = Environment.ProcessId;
+        bool had = GetRenderDevice(me) is not null;
+        SetRenderDeviceCore(me, null);
+        return had;
+    }
+
+    private bool SetRenderDeviceCore(int processId, string? mmDeviceId)
     {
         var factory = GetFactory();
         if (factory is null) return false;

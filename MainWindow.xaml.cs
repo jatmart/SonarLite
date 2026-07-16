@@ -76,6 +76,15 @@ public partial class MainWindow : Window
         _audio.Refresh();   // discover the cable + current sessions before the engine starts
         StartEngine();
 
+        // Likewise, a routing override an older build put on *us* outlives the process that wrote it
+        // (Windows persists these per app identity, so every later pid inherits it) and makes every
+        // default-device read in this process return the cable, whatever the real default is.
+        // Deliberately after StartEngine, not before: the override only becomes visible -- and only
+        // takes effect -- once this pid owns an audio session, which is the render stream the engine
+        // just opened. See AppRoutingService.ClearSelfRoute.
+        if (_routing.ClearSelfRoute())
+            StatusLabel.Text = "Cleared a stale routing override SonarLite had applied to itself.";
+
         // Reflecting the saved state into the checkbox raises Checked, whose handler writes the Run
         // key with the *currently running* exe path. Unsuppressed, merely launching the app rewrites
         // autostart to point at whichever build was launched -- so running the Debug exe once
@@ -257,6 +266,12 @@ public partial class MainWindow : Window
         // The engine picks its own render device; the dropdown has to follow it, not predict it.
         SyncPlaybackSelection();
         SyncDevicePresets();
+        // ...and so does Windows' default, so the volume control acts on the device we just moved the
+        // mix to. Doing it here rather than waiting for a device notification matters at launch: the
+        // engine resolves its render target itself (ResolveRealDefaultDevice), so on a machine whose
+        // saved default is the powered-off headset, nothing else would ever raise a notification to
+        // correct it -- the state stayed wrong until a device was physically plugged or unplugged.
+        EnforceDefaultPlayback();
     }
 
     /// <summary>
@@ -570,6 +585,9 @@ public partial class MainWindow : Window
         // The mic rides the same refreshes: a headset power transition funnels through here, so its
         // mic follows its speakers instead of being left dead on the powered-off headset.
         SwitchToPreferredInput();
+        // Last, and unconditionally: the two calls above only move things when the *mix* is on the
+        // wrong device, and Windows' default drifting on its own doesn't move the mix at all.
+        EnforceDefaultPlayback();
     }
 
     private static bool SameDevices(List<DeviceOption> a, List<DeviceOption> b) =>
@@ -648,6 +666,70 @@ public partial class MainWindow : Window
             _switchPending = false;
             RestartEngine();
         });
+    }
+
+    /// <summary>
+    /// Hold Windows' default playback device on whatever the engine is actually rendering to.
+    ///
+    /// This is a separate question from <see cref="SwitchToPreferredOutput"/>, and used not to be --
+    /// which is the whole bug. That method only acts when the *mix* is on the wrong device, so the
+    /// moment the engine settled on the right one it stopped looking, and Windows' default was free to
+    /// sit somewhere else indefinitely. The two really are independent: the engine snapshots its render
+    /// device at Start() and never follows the default afterward (see AudioEngine.RenderDeviceId), and
+    /// nothing else moved the default back. The result was sound out of the speakers with no working
+    /// volume control -- Windows still pointed at the powered-off Arctis, whose endpoint stays Active
+    /// because the base station never leaves USB, so the volume UI was adjusting dead air.
+    ///
+    /// Enforced continuously rather than set once, because the default moves behind our back: Windows
+    /// promotes a freshly-arrived endpoint on its own, and the Arctis endpoint re-arrives every time
+    /// the base station re-enumerates. Every device notification lands here.
+    /// </summary>
+    private void EnforceDefaultPlayback()
+    {
+        // Mid-switch the engine still names the old device; enforcing now would drag the default back
+        // onto it. The queued restart raises its own refresh, which lands here once it's settled.
+        if (_switchPending) return;
+
+        // Only the running engine is authoritative about where audio is going. With it stopped there's
+        // no mix to keep the volume control aligned with, and SwitchToPreferredOutput above is already
+        // the one that moves the default in that state.
+        var target = _engine.RenderDeviceId;
+        if (target is null || _devices.GetDefaultPlaybackId() == target) return;
+
+        if (!_defaultAssert.Allow())
+        {
+            StatusLabel.Text = "Another app keeps taking the default output; stopped re-asserting it.";
+            return;
+        }
+
+        _devices.SetDefaultPlayback(target);
+        StatusLabel.Text = $"Default output reset to {_engine.RenderDeviceName ?? "current output"}.";
+    }
+
+    /// <summary>
+    /// Budget for default-device re-asserts, so a disagreement can't become a spin. Our own
+    /// SetDefaultPlayback raises OnDefaultDeviceChanged, which comes straight back as a refresh --
+    /// harmless on its own (the default matches by then, so the check no-ops), but an app that
+    /// re-asserts a *different* default each time would trade the default back and forth with us as
+    /// fast as the notifications arrive. Each round trip re-enumerates endpoints, which leaks a native
+    /// handle per call (see [[naudio-mmdevicecollection-handle-leak]]), so an unbounded fight is a leak
+    /// as well as a flapping default. Lose the fight loudly instead, and let the sliding window pick
+    /// enforcement back up once the other app settles.
+    /// </summary>
+    private readonly AssertBudget _defaultAssert = new(limit: 5, window: TimeSpan.FromSeconds(10));
+
+    private sealed class AssertBudget(int limit, TimeSpan window)
+    {
+        private readonly Queue<DateTime> _hits = new();
+
+        public bool Allow()
+        {
+            var now = DateTime.UtcNow;
+            while (_hits.Count > 0 && now - _hits.Peek() > window) _hits.Dequeue();
+            if (_hits.Count >= limit) return false;
+            _hits.Enqueue(now);
+            return true;
+        }
     }
 
     /// <summary>The recording twin of <see cref="PreferredOutput"/>: the mic the user most wants, among
