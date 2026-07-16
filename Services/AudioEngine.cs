@@ -76,11 +76,16 @@ public sealed class AudioEngine : IDisposable
     /// <summary>
     /// Renders to <paramref name="headset"/> exactly as given -- the caller (MainWindow, via
     /// AudioSessionService.ResolveRealDefaultDevice()) is responsible for resolving the real
-    /// output device. This used to call GetDefaultAudioEndpoint() itself, which can legitimately
-    /// return SonarLite's own routing cable as "default" (apps actively tapped onto it make
-    /// Windows report it that way) -- rendering the whole mix into the cable is silent output,
-    /// since nothing is listening to it as real speakers. Takes ownership of <paramref
-    /// name="headset"/> either way (disposed on failure, or held for the engine's lifetime).
+    /// output device. This used to call GetDefaultAudioEndpoint() itself, which could return
+    /// SonarLite's own routing cable as "default" -- rendering the whole mix into the cable is silent
+    /// output, since nothing is listening to it as real speakers. That was long blamed on "apps tapped
+    /// onto the cable make Windows report it that way", which was wrong: the real cause was SonarLite
+    /// holding a per-app routing override on *itself*, which by design redefines what "default"
+    /// resolves to inside this process. Fixed at the source (AppRoutingService.ClearSelfRoute /
+    /// SetRenderDevice), so the raw default is trustworthy again -- but taking the device from the
+    /// caller is still the right shape, since only the caller knows about manual picks and headset
+    /// power. Takes ownership of <paramref name="headset"/> either way (disposed on failure, or held
+    /// for the engine's lifetime).
     /// </summary>
     public bool Start(MMDevice? headset)
     {
