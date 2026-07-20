@@ -626,7 +626,13 @@ public partial class MainWindow : Window
     /// </summary>
     private DeviceOption? PreferredOutput()
     {
-        var pick = _boundPlayback.FirstOrDefault(d => d.Id == _userPick && _audio.IsUsableOutput(d.Name));
+        // The pick deliberately skips the IsUsableOutput gate the ranked path applies below: an
+        // explicit pick of the headset while it's flagged off is the user overruling detection, and
+        // it's the only manual way out when that flag is stale or wrong -- gated, the very next
+        // refresh dragged their pick straight back to the speakers. A *genuinely* powering-off
+        // headset still fails over, because that arrives as a power transition, which clears
+        // _userPick before this runs.
+        var pick = _boundPlayback.FirstOrDefault(d => d.Id == _userPick);
         return pick ?? _boundPlayback
             .Where(d => _audio.IsUsableOutput(d.Name))
             .Select(d => (Device: d, Rank: _audio.PreferenceRank(d.Id, d.Name)))
@@ -745,7 +751,10 @@ public partial class MainWindow : Window
     /// says the current mic is unusable, fall back to any usable mic rather than returning null.</summary>
     private DeviceOption? PreferredInput(bool allowUnranked)
     {
-        var pick = _boundRecording.FirstOrDefault(d => d.Id == _userRecordingPick && _audio.IsUsableInput(d.Name));
+        // Same rule as PreferredOutput's pick: an explicit hand-pick outranks the headset power
+        // flag, which can be stale -- a genuine power-off clears _userRecordingPick via the
+        // transition before this runs.
+        var pick = _boundRecording.FirstOrDefault(d => d.Id == _userRecordingPick);
         if (pick is not null) return pick;
 
         var usable = _boundRecording
@@ -895,7 +904,10 @@ public partial class MainWindow : Window
     /// </summary>
     private void OnHidStatus(object? sender, byte[] report)
     {
-        if (report.Length < 5 || report[1] != 0xB5) return;
+        // Both bytes checked: StatusReport forwards every non-ChatMix report on col02, whatever its
+        // report ID, and a different report type whose byte 1 happens to be 0xB5 would otherwise be
+        // read as a power transition -- the kind that clears a hand-picked device.
+        if (report.Length < 5 || report[0] != 0x07 || report[1] != 0xB5) return;
         bool? online = report[4] switch { 0x08 => true, 0x04 => false, _ => null };
         if (online is null) return;
         // The pushed 0xB5 report is the fast path on a transition; the polled 0xB0 status is the
