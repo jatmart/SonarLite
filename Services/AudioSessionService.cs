@@ -546,14 +546,18 @@ public sealed class AudioSessionService : IDisposable
         // A hand-picked device wins outright, ahead of Windows' own default: while SonarLite is
         // routing tapped apps into the cable, Windows reports the cable as the default, so trusting
         // that default here would throw the user's pick away on the next (re)start. Only honoured
-        // while it's actually a live, usable endpoint -- a powered-off headset or a vanished device
-        // falls through to the normal resolution below.
+        // while the endpoint actually exists and is Active -- a vanished device falls through to the
+        // normal resolution below. Deliberately NOT gated on IsUsableOutput, matching MainWindow's
+        // PreferredOutput: a hand-pick of the headset while HeadsetOnline is (possibly wrongly)
+        // false is the user overruling detection, and gating it here made the engine render
+        // somewhere other than the device the dropdown showed. A genuine power-off clears the
+        // override via the transition, so real failover is unaffected.
         if (ManualOutputOverride is not null && ManualOutputOverride != NullSinkDeviceId)
         {
             try
             {
                 var picked = _enumerator.GetDevice(ManualOutputOverride);
-                if (picked.State == DeviceState.Active && IsUsableOutput(SafeName(picked))) return picked;
+                if (picked.State == DeviceState.Active) return picked;
                 picked.Dispose();
             }
             catch { /* stale id; fall through */ }

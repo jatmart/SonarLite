@@ -35,10 +35,13 @@ public sealed class HidChatMixListener : IDisposable
     private const int HeadsetStateByte = 6;
     // Byte 6 of the 0xB0 status reply carries the power flag. Firmware reports 0x08 when the headset
     // is on -- the same 0x08=on flag the pushed 0xB5 report uses at report[4] (see OnHidStatus).
-    // An earlier capture recorded 0x02, so accept both as "on"; anything else (0x00 or 0x04 when
-    // off) is treated as off. Reading this as a fixed 0x02 was why a headset that was already on at
-    // launch on current firmware was mis-detected as off and the mix defaulted to the speakers.
-    private static bool IsConnectedFlag(byte b) => b is 0x08 or 0x02;
+    // An earlier capture recorded 0x02, so accept that too. 0x08 is tested as a bit, not an exact
+    // value: this byte has already changed meaning across firmware once, and an exact-match
+    // whitelist turns any unlisted on-state (a composite like 0x0C while charging or with ANC
+    // toggled) into a persistent false "off" -- which cleared the user's pick, moved the mix to the
+    // speakers mid-session, and re-confirmed itself on every 2s poll with no way back while the
+    // headset was audibly on. Observed off values (0x00, 0x04) have the 0x08 bit clear.
+    private static bool IsConnectedFlag(byte b) => (b & 0x08) != 0 || b == 0x02;
 
     private CancellationTokenSource? _cts;
     private Thread? _loop;
@@ -64,6 +67,17 @@ public sealed class HidChatMixListener : IDisposable
 
     private bool? _headsetOnline;
     private bool _dialConnected;
+
+    // UTC ticks of the last valid 0xB0 reply, written by the status-reader thread and read by the
+    // main loop. Any valid reply counts, including "off" -- silence here means the col01 pipe is
+    // broken, not that the headset is off, and those must not be conflated: a broken pipe freezes
+    // _headsetOnline at whatever was last seen, potentially stranding the mix on the wrong device
+    // for the rest of the session.
+    private long _lastStatusReplyTicks;
+
+    // Probes go out every 2s, so this allows ~7 consecutive unanswered probes before the col01
+    // status pipe is presumed dead and both collections are reconnected.
+    private static readonly TimeSpan StatusSilenceLimit = TimeSpan.FromSeconds(15);
 
     private void SetDialConnected(bool connected)
     {
@@ -121,6 +135,7 @@ public sealed class HidChatMixListener : IDisposable
 
                 if (outStream is not null)
                 {
+                    Interlocked.Exchange(ref _lastStatusReplyTicks, DateTime.UtcNow.Ticks);
                     statusReader = new Thread(() => ReadStatusLoop(outStream, token), maxStackSize: 128 * 1024)
                     { IsBackground = true, Name = "hid-status" };
                     statusReader.Start();
@@ -146,6 +161,22 @@ public sealed class HidChatMixListener : IDisposable
                     {
                         SendCommand(outDev, outStream, 0xB0);
                         lastProbe = DateTime.UtcNow;
+
+                        // The status reader is the only live source of the headset's power state,
+                        // and it can die (any non-timeout read error) or go silent (writes failing
+                        // into a broken col01 stream, swallowed by SendCommand) while this dial
+                        // stream stays perfectly healthy -- in which case nothing else here would
+                        // ever notice, and _headsetOnline stays frozen for the rest of the session.
+                        // Tear the connection down instead; the outer loop re-opens both
+                        // collections and finally's _headsetOnline = null makes the next reading
+                        // an initial one rather than a fake power transition.
+                        if (statusReader is not null &&
+                            (!statusReader.IsAlive ||
+                             DateTime.UtcNow - new DateTime(Interlocked.Read(ref _lastStatusReplyTicks), DateTimeKind.Utc) > StatusSilenceLimit))
+                        {
+                            Thread.Sleep(1000);   // keep a persistently-broken col01 from becoming a tight reconnect spin
+                            break;
+                        }
                     }
 
                     int n;
@@ -223,6 +254,7 @@ public sealed class HidChatMixListener : IDisposable
                 catch { break; }   // stream torn down under us; the outer loop re-establishes it
 
                 if (n <= HeadsetStateByte || buf[0] != OutReportId || buf[1] != StatusParam) continue;
+                Interlocked.Exchange(ref _lastStatusReplyTicks, DateTime.UtcNow.Ticks);
                 SetHeadsetOnline(IsConnectedFlag(buf[HeadsetStateByte]));
             }
         }
