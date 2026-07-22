@@ -11,7 +11,7 @@
     <!-- Version stamped into the exe so it self-reports; keep in lockstep with the git release tag
          (tags are the source of truth for releases, e.g. v0.3.0). Bump here in the same commit you
          tag. -->
-    <Version>0.3.2</Version>
+    <Version>0.3.3</Version>
 
     <!-- A tray-resident mixer should stay small: workstation GC with a non-concurrent collector
          keeps the heap tight. Do NOT set InvariantGlobalization here — WPF's binding engine calls
