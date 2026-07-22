@@ -39,6 +39,23 @@ public sealed class AudioEngine : IDisposable
     private MMDevice? _renderDevice;
     private WaveFormat? _format;
 
+    /// <summary>
+    /// Master attenuation for the whole mix, driven by the volume of whichever endpoint Windows is
+    /// showing the user (see <see cref="EndpointVolumeMirror"/>). Held as a field rather than only on
+    /// the live provider so it survives Stop/Start -- the engine rebuilds on every device change, and
+    /// a volume that silently reset to full on each rebuild would be its own bug.
+    ///
+    /// This has to be a gain stage inside the mix, not a write to the render endpoint's volume. The
+    /// Arctis Nova Pro reports HardwareSupport = Volume, Mute and handles its level on the device,
+    /// so it *silently ignores* MasterVolumeLevelScalar writes -- verified: writing 0.42 read back
+    /// 1.000, no exception. Any design that mirrors volume by writing the output endpoint works on a
+    /// Realtek and does nothing at all on the headset the user actually wears. Attenuating the
+    /// samples we already own works everywhere and cannot be refused.
+    /// </summary>
+    private float _masterGain = 1f;
+    private bool _masterMute;
+    private VolumeSampleProvider? _masterVolume;
+
     public bool IsRunning { get; private set; }
     public string Status { get; private set; } = "Not started";
 
@@ -71,6 +88,23 @@ public sealed class AudioEngine : IDisposable
     public int TapCount
     {
         get { lock (_sync) return _buses.Values.Sum(b => b.Taps.Count); }
+    }
+
+    /// <summary>
+    /// Set the master gain from a linear amplitude (1.0 = unity), plus mute. The caller converts
+    /// Windows' volume scalar through the endpoint's own dB taper before calling, so the result
+    /// tracks the loudness curve the volume UI implies rather than a raw linear fraction -- 50% on
+    /// the slider is about -18dB, not half amplitude, and using the scalar directly would make the
+    /// top of the range feel almost flat and the bottom fall off a cliff.
+    /// </summary>
+    public void SetMasterVolume(float amplitude, bool mute)
+    {
+        lock (_sync)
+        {
+            _masterGain = Math.Clamp(amplitude, 0f, 1f);
+            _masterMute = mute;
+            if (_masterVolume is not null) _masterVolume.Volume = _masterMute ? 0f : _masterGain;
+        }
     }
 
     /// <summary>
@@ -110,8 +144,13 @@ public sealed class AudioEngine : IDisposable
                     _buses[cls] = new Bus { Mixer = mixer, Eq = eq, Volume = volume };
                 }
 
+                // Master gain sits after the bus mix and before the limiter, so turning the volume
+                // down actually reduces what the limiter has to work on rather than being clamped
+                // back up by it.
+                _masterVolume = new VolumeSampleProvider(master) { Volume = _masterMute ? 0f : _masterGain };
+
                 _output = new WasapiOut(headset, AudioClientShareMode.Shared, true, 50);
-                _output.Init(new SafetyLimiter(master));
+                _output.Init(new SafetyLimiter(_masterVolume));
                 _output.Play();
 
                 _renderDevice = headset;

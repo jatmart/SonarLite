@@ -32,16 +32,39 @@ public sealed class HidChatMixListener : IDisposable
     private const byte OutReportId = 0x06;
     private const byte EnableChatMixParam = 0x49;
     private const byte StatusParam = 0xB0;
-    private const int HeadsetStateByte = 6;
-    // Byte 6 of the 0xB0 status reply carries the power flag. Firmware reports 0x08 when the headset
-    // is on -- the same 0x08=on flag the pushed 0xB5 report uses at report[4] (see OnHidStatus).
-    // An earlier capture recorded 0x02, so accept that too. 0x08 is tested as a bit, not an exact
-    // value: this byte has already changed meaning across firmware once, and an exact-match
-    // whitelist turns any unlisted on-state (a composite like 0x0C while charging or with ANC
-    // toggled) into a persistent false "off" -- which cleared the user's pick, moved the mix to the
-    // speakers mid-session, and re-confirmed itself on every 2s poll with no way back while the
-    // headset was audibly on. Observed off values (0x00, 0x04) have the 0x08 bit clear.
-    private static bool IsConnectedFlag(byte b) => (b & 0x08) != 0 || b == 0x02;
+    // Bytes 14/15 of the 0xB0 status reply, NOT byte 6, are the headset's power state:
+    // 08 08 = on, 04 01 = off. Same 0x08=on / 0x04=off semantics as the pushed 0xB5 report's
+    // report[4] (see MainWindow.OnHidStatus), which is why these two agree across firmwares.
+    //
+    // Byte 6 was used for this and must not be again. It has now carried three different "on"
+    // encodings on this same base station -- 0x08, then 0x02, then 0x03 -- and every time it changed,
+    // a powered-ON headset started reporting as off: it was dropped from the output candidate list
+    // (IsUsableOutput), the mix jumped to the speakers mid-session, and the 2s poll re-confirmed the
+    // wrong answer forever. Three separate "fix the power detection" rounds were each just the next
+    // guess at this byte's encoding. Bytes 14/15 were stable across all three (verified against the
+    // live capture below and the earlier one this file already documented), so the fix is to stop
+    // reading the volatile byte rather than to widen the guess again.
+    //
+    //   on  (fw 0130, captured live): 06 B0 00 00 01 00 03 08 08 00 02 0A 04 00 [08 08] 00 00 00 00
+    //   on  (earlier capture):        06 B0 00 00 01 00 02 08 08 00 02 0A 04 00 [08 08] ...
+    //   off (earlier capture):        06 B0 00 00 01 00 00 08 08 00 02 0A 04 00 [04 01] ...
+    private const int PowerStateByte = 14;
+
+    /// <summary>
+    /// Tri-state on purpose. A frame we do not recognise returns null meaning "no opinion", and the
+    /// caller keeps the previous state rather than flipping to off -- that is the whole lesson of the
+    /// byte-6 history above. A boolean here has no way to say "the pipe answered but the encoding
+    /// moved again", so it is forced to invent an answer, and inventing "off" is the failure that
+    /// strands audio on the speakers with no way back while the headset is audibly on.
+    /// </summary>
+    private static bool? ParsePowerState(byte[] frame, int n)
+    {
+        if (n <= PowerStateByte) return null;
+        byte b = frame[PowerStateByte];
+        if ((b & 0x08) != 0) return true;
+        if ((b & 0x04) != 0) return false;
+        return null;
+    }
 
     private CancellationTokenSource? _cts;
     private Thread? _loop;
@@ -253,9 +276,13 @@ public sealed class HidChatMixListener : IDisposable
                 catch (TimeoutException) { continue; }
                 catch { break; }   // stream torn down under us; the outer loop re-establishes it
 
-                if (n <= HeadsetStateByte || buf[0] != OutReportId || buf[1] != StatusParam) continue;
+                if (n <= PowerStateByte || buf[0] != OutReportId || buf[1] != StatusParam) continue;
+                // Any well-formed reply counts as the pipe being alive, even one whose power bytes we
+                // cannot read -- liveness and power state are separate facts, and conflating them is
+                // what would make an unreadable encoding masquerade as a dead pipe and trigger a
+                // pointless reconnect loop.
                 Interlocked.Exchange(ref _lastStatusReplyTicks, DateTime.UtcNow.Ticks);
-                SetHeadsetOnline(IsConnectedFlag(buf[HeadsetStateByte]));
+                if (ParsePowerState(buf, n) is bool online) SetHeadsetOnline(online);
             }
         }
         catch { /* the outer loop owns recovery */ }

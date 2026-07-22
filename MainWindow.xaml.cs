@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private readonly AudioSessionService _audio;
     private readonly HidChatMixListener _hid = new();
     private readonly DeviceSwitcherService _devices = new();
+    private readonly EndpointVolumeMirror _volumeMirror;
     private readonly EqualizerApoService _apo = new();
     private readonly DispatcherTimer _refreshTimer;
     private readonly DispatcherTimer _meterTimer;
@@ -58,6 +59,9 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         _audio = new AudioSessionService(_prefs, _routing);
+        // The cable's volume is what the volume keys move; the engine's master gain is the only place
+        // that can actually act on it (the headset refuses endpoint volume writes -- see the mirror).
+        _volumeMirror = new EndpointVolumeMirror((amp, mute) => _engine.SetMasterVolume(amp, mute));
         GameList.ItemsSource = CreateFilteredView(SessionClass.Game);
         ChatList.ItemsSource = CreateFilteredView(SessionClass.Chat);
         MediaList.ItemsSource = CreateFilteredView(SessionClass.Media);
@@ -168,6 +172,17 @@ public partial class MainWindow : Window
         System.Windows.Application.Current.SessionEnding += (_, _) => SafeRevertRoutings();
     }
 
+    /// <summary>
+    /// Undo everything that only makes sense while SonarLite is running: the per-app routes onto the
+    /// cable, and the cable being Windows' default.
+    ///
+    /// Restoring the default is not tidiness, it is the difference between working audio and none.
+    /// The cable is a silent sink -- the *only* reason sound comes out of it is the engine tapping it
+    /// and mixing it back. Exiting while it is still the default leaves every app on this machine
+    /// rendering into a sink nobody is listening to, with SonarLite gone and no obvious culprit. That
+    /// is worse than any bug it replaced, so it runs on every exit path (orderly close, ProcessExit,
+    /// SessionEnding) and is deliberately best-effort rather than conditional.
+    /// </summary>
     private void SafeRevertRoutings()
     {
         try
@@ -178,6 +193,19 @@ public partial class MainWindow : Window
         catch
         {
             // Shutting down; nothing left to recover with.
+        }
+
+        try
+        {
+            // Prefer wherever the mix was actually going -- that's the device the user was listening
+            // to a moment ago. Falls back to the ranked pick if the engine is already torn down.
+            var restore = _engine.RenderDeviceId ?? PreferredOutput()?.Id;
+            if (restore is not null && _devices.GetDefaultPlaybackId() == _audio.NullSinkDeviceId)
+                _devices.SetDefaultPlayback(restore);
+        }
+        catch
+        {
+            // Best effort: never block shutdown on this.
         }
     }
 
@@ -256,6 +284,8 @@ public partial class MainWindow : Window
             _audio.ReapplyVolumes();
             UpdateEqStatus();
             SyncPlaybackSelection();
+            // Nothing is mixing the cable back out, so its volume has nothing to act on.
+            _volumeMirror.Retarget(null);
             return;
         }
 
@@ -266,12 +296,15 @@ public partial class MainWindow : Window
         // The engine picks its own render device; the dropdown has to follow it, not predict it.
         SyncPlaybackSelection();
         SyncDevicePresets();
-        // ...and so does Windows' default, so the volume control acts on the device we just moved the
-        // mix to. Doing it here rather than waiting for a device notification matters at launch: the
-        // engine resolves its render target itself (ResolveRealDefaultDevice), so on a machine whose
-        // saved default is the powered-off headset, nothing else would ever raise a notification to
-        // correct it -- the state stayed wrong until a device was physically plugged or unplugged.
+        // ...and so does Windows' default, which we hold on the cable so every app is captured.
+        // Doing it here rather than waiting for a device notification matters at launch: the engine
+        // resolves its render target itself (ResolveRealDefaultDevice), so nothing else would ever
+        // raise a notification to correct a stale saved default -- the state stayed wrong until a
+        // device was physically plugged or unplugged.
         EnforceDefaultPlayback();
+        // Pinning the cable is only half the job; without this the volume keys move an endpoint
+        // nobody listens to. Re-pointed on every start because the render target can change.
+        _volumeMirror.Retarget(_audio.NullSinkDeviceId);
     }
 
     /// <summary>
@@ -588,6 +621,11 @@ public partial class MainWindow : Window
         // Last, and unconditionally: the two calls above only move things when the *mix* is on the
         // wrong device, and Windows' default drifting on its own doesn't move the mix at all.
         EnforceDefaultPlayback();
+        // Re-point the volume bridge here as well as in StartEngine. A device notification can change
+        // which endpoints exist without the engine ever restarting, and a mirror left pointing at a
+        // stale pair is a volume key that silently stops working. Retarget no-ops when the pair is
+        // unchanged, which is the common case.
+        _volumeMirror.Retarget(_audio.NullSinkDeviceId);
     }
 
     private static bool SameDevices(List<DeviceOption> a, List<DeviceOption> b) =>
@@ -658,14 +696,18 @@ public partial class MainWindow : Window
         if (_switchPending) return;
 
         // Compared against what's actually playing, not against _engine.RenderDeviceId directly: with
-        // the engine stopped that's null forever, so re-asserting the default on every refresh would
-        // never look satisfied and would loop. CurrentOutputId falls back to Windows' default, which
-        // the SetDefaultPlayback below does move.
+        // the engine stopped that's null forever, so re-asserting on every refresh would never look
+        // satisfied and would loop. CurrentOutputId falls back to Windows' default, which the restart
+        // below does move off (the engine re-resolves its render target from scratch).
         var best = PreferredOutput();
         if (best is null || CurrentOutputId == best.Id) return;
 
+        // Deliberately does *not* touch Windows' default any more. The default belongs to the cable
+        // now (see EnforceDefaultPlayback), so it is no longer how "where the mix goes" is expressed
+        // -- the engine's render target is. Setting it here would just be immediately undone by the
+        // cable pin, one endpoint-notification round trip later, forever. Restarting is enough:
+        // ResolveRealDefaultDevice re-ranks and lands on `best` on its own.
         _switchPending = true;
-        _devices.SetDefaultPlayback(best.Id);
         StatusLabel.Text = $"Switched output to {best.Name}.";
         Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
         {
@@ -675,16 +717,22 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Hold Windows' default playback device on whatever the engine is actually rendering to.
+    /// Hold Windows' default playback device on the routing cable, so that every app -- including
+    /// ones SonarLite has never seen and never routed -- lands on the cable, gets tapped by PID, and
+    /// comes back through the EQ. This is the "capture everything" entrance.
     ///
-    /// This is a separate question from <see cref="SwitchToPreferredOutput"/>, and used not to be --
-    /// which is the whole bug. That method only acts when the *mix* is on the wrong device, so the
-    /// moment the engine settled on the right one it stopped looking, and Windows' default was free to
-    /// sit somewhere else indefinitely. The two really are independent: the engine snapshots its render
-    /// device at Start() and never follows the default afterward (see AudioEngine.RenderDeviceId), and
-    /// nothing else moved the default back. The result was sound out of the speakers with no working
-    /// volume control -- Windows still pointed at the powered-off Arctis, whose endpoint stays Active
-    /// because the base station never leaves USB, so the volume UI was adjusting dead air.
+    /// It used to pin the default to <c>_engine.RenderDeviceId</c> (the headset) instead, and that is
+    /// the bug this whole loop was made of. Windows' default endpoint was being asked to do two
+    /// mutually exclusive jobs at once -- be the capture entrance (wants the cable) *and* be the thing
+    /// the volume keys act on (wants the headset) -- so every fix served one and broke the other. The
+    /// pin is only half a design on its own; <see cref="EndpointVolumeMirror"/> is the other half, and
+    /// the two must stay together. Pinning the cable without the mirror is the "volume slider does
+    /// nothing" bug; the old headset pin without the mirror was the "can't select the cable" bug.
+    ///
+    /// Nothing is silenced by this. The tap set follows <c>PidsOnNullSink</c> -- whoever is actually
+    /// on the cable, whatever their bus's curve (see <see cref="SyncEngineTaps"/>) -- rather than the
+    /// set of buses we asked to route, so an app that arrives on the cable merely by being on the
+    /// default is tapped and mixed back like any other.
     ///
     /// Enforced continuously rather than set once, because the default moves behind our back: Windows
     /// promotes a freshly-arrived endpoint on its own, and the Arctis endpoint re-arrives every time
@@ -696,10 +744,11 @@ public partial class MainWindow : Window
         // onto it. The queued restart raises its own refresh, which lands here once it's settled.
         if (_switchPending) return;
 
-        // Only the running engine is authoritative about where audio is going. With it stopped there's
-        // no mix to keep the volume control aligned with, and SwitchToPreferredOutput above is already
-        // the one that moves the default in that state.
-        var target = _engine.RenderDeviceId;
+        // Only pin the cable while there is actually a mix bringing it back out. With the engine
+        // stopped the cable is a sink nobody is listening to, so holding the default there would be
+        // total silence with no way out from the UI; SwitchToPreferredOutput is the one that moves
+        // the default to a real device in that state.
+        var target = _engine.IsRunning ? _audio.NullSinkDeviceId : null;
         if (target is null || _devices.GetDefaultPlaybackId() == target) return;
 
         if (!_defaultAssert.Allow())
@@ -709,7 +758,7 @@ public partial class MainWindow : Window
         }
 
         _devices.SetDefaultPlayback(target);
-        StatusLabel.Text = $"Default output reset to {_engine.RenderDeviceName ?? "current output"}.";
+        StatusLabel.Text = $"Routing all audio through SonarLite to {_engine.RenderDeviceName ?? "current output"}.";
     }
 
     /// <summary>
@@ -815,8 +864,10 @@ public partial class MainWindow : Window
 
         _userPick = device.Id;
         _prefs.PromotePlayback(device.Id);
-        _devices.SetDefaultPlayback(device.Id);
-        // The engine renders into the default device; rebuild it on the new one.
+        // No SetDefaultPlayback: Windows' default is the cable (EnforceDefaultPlayback) and picking
+        // an output here means "render the mix there", not "hand Windows a new default". The write
+        // goes through _userPick -> _audio.ManualOutputOverride, which is what the restart's
+        // ResolveRealDefaultDevice reads.
         Dispatcher.BeginInvoke(DispatcherPriority.Background, RestartEngine);
     }
 
@@ -927,7 +978,13 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyHeadsetPower(bool online, bool isInitial)
     {
-        if (online == _audio.HeadsetOnline && !isInitial) return;
+        // Checked before the no-op bail below: the very first reading is often "false" and so matches
+        // the default, but it still promotes the flag from "never heard from" to "actually reported
+        // off", which is a real state change even though the boolean did not move.
+        bool firstReading = !_audio.HeadsetPowerKnown;
+        _audio.HeadsetPowerKnown = true;
+
+        if (online == _audio.HeadsetOnline && !isInitial && !firstReading) return;
 
         _audio.HeadsetOnline = online;
         if (!isInitial)
@@ -1102,9 +1159,19 @@ public partial class MainWindow : Window
 
     private void ShowFromTray()
     {
-        Show();
+        // Restore state BEFORE Show(), not after. The window is parked both Hidden and Minimized, so
+        // calling Show() first paints it minimized on the taskbar, and a WindowState = Normal issued
+        // in the same synchronous pass right after Show() is silently dropped by WPF. That's the
+        // "first double-click only surfaces a minimized stub, second one restores it" bug: the second
+        // click's Show() is a no-op, letting the Normal finally take. Setting state on the still
+        // hidden window makes one click do the whole job.
         WindowState = WindowState.Normal;
+        Show();
         Activate();
+        // Show()+Activate() alone doesn't reliably pull the window above whatever's in the
+        // foreground; a brief Topmost bounce forces it to the front without pinning it there.
+        Topmost = true;
+        Topmost = false;
         RefreshDeviceLists(); // one cheap catch-up in case anything raced with the window reopening
     }
 
@@ -1144,6 +1211,7 @@ public partial class MainWindow : Window
             SafeRevertRoutings();
             _engine.Dispose();
             _audio.Dispose();
+            _volumeMirror.Dispose();
             _devices.Dispose();
             _trayIcon?.Dispose();
             return;

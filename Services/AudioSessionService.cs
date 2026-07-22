@@ -467,6 +467,23 @@ public sealed class AudioSessionService : IDisposable
     public bool HeadsetOnline { get; set; }
 
     /// <summary>
+    /// True once a real power reading has actually arrived from the base station. Until then
+    /// <see cref="HeadsetOnline"/>'s <c>false</c> means "nobody has told us yet", which is a
+    /// completely different claim from "the headset is off" -- and treating the two as the same is
+    /// what turns any HID hiccup into a headset that cannot be selected at all.
+    ///
+    /// This exists because the power byte's encoding has moved three times across firmware revisions
+    /// (see HidChatMixListener.ParsePowerState). Each time, the parse silently began answering "off"
+    /// for a powered-on headset, IsUsableOutput dropped the Arctis from every candidate list, and the
+    /// mix moved to the speakers with no way back. Fixing each new encoding only ever bought time
+    /// until the next one. Failing toward "usable" when we have no reading is what makes that class
+    /// of bug a non-event instead of the next round of the same loop: the cost of a wrong "on" is a
+    /// moment of silence that the next status report corrects, while the cost of a wrong "off" is
+    /// audio yanked onto the wrong device and a headset the user cannot pick.
+    /// </summary>
+    public bool HeadsetPowerKnown { get; set; }
+
+    /// <summary>
     /// The playback device the user picked by hand (MainWindow's _userPick, mirrored here), or null.
     /// The engine's render-target resolution has to see this: SonarLite's own per-app routing makes
     /// tapped apps report the *cable* as the system default, so once the engine (re)starts,
@@ -480,8 +497,10 @@ public sealed class AudioSessionService : IDisposable
 
     public static bool IsHeadset(string name) => name.Contains("Arctis", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>False for a headset that's powered off -- never a legal render target.</summary>
-    public bool IsUsableOutput(string name) => HeadsetOnline || !IsHeadset(name);
+    /// <summary>False for a headset we have been *told* is powered off -- never a legal render
+    /// target. An unheard-from headset (<see cref="HeadsetPowerKnown"/> still false) stays usable;
+    /// see that property for why silence must not be read as "off".</summary>
+    public bool IsUsableOutput(string name) => !IsHeadset(name) || !HeadsetPowerKnown || HeadsetOnline;
 
     /// <summary>Same rule for capture: a powered-off headset's mic endpoint stays present on USB but
     /// is dead, so it is never a legal recording target either. Named separately from
