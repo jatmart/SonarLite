@@ -85,11 +85,6 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
-    public int TapCount
-    {
-        get { lock (_sync) return _buses.Values.Sum(b => b.Taps.Count); }
-    }
-
     /// <summary>
     /// Set the master gain from a linear amplitude (1.0 = unity), plus mute. The caller converts
     /// Windows' volume scalar through the endpoint's own dB taper before calling, so the result
