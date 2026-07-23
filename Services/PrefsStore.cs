@@ -18,7 +18,6 @@ public sealed class PrefsStore
 
     private Dictionary<string, SessionPrefs> _sessions = new(StringComparer.OrdinalIgnoreCase);
 
-    public bool StartWithWindows { get; set; }
     public Dictionary<string, double[]> EqGains { get; set; } = new();       // keyed by SessionClass name
     public Dictionary<string, string> EqPresets { get; set; } = new();       // profile -> preset name
     public bool EqEnabled { get; set; } = true;
@@ -103,7 +102,6 @@ public sealed class PrefsStore
                 if (data is not null)
                 {
                     _sessions = new Dictionary<string, SessionPrefs>(data.Sessions, StringComparer.OrdinalIgnoreCase);
-                    StartWithWindows = data.StartWithWindows;
                     EqGains = data.EqGains;
                     EqPresets = data.EqPresets;
                     EqEnabled = data.EqEnabled;
@@ -128,7 +126,6 @@ public sealed class PrefsStore
             var data = new StoredData
             {
                 Sessions = _sessions,
-                StartWithWindows = StartWithWindows,
                 EqGains = EqGains,
                 EqPresets = EqPresets,
                 EqEnabled = EqEnabled,
@@ -148,7 +145,6 @@ public sealed class PrefsStore
     private sealed class StoredData
     {
         public Dictionary<string, SessionPrefs> Sessions { get; set; } = new();
-        public bool StartWithWindows { get; set; }
         public Dictionary<string, double[]> EqGains { get; set; } = new();
         public Dictionary<string, string> EqPresets { get; set; } = new();
         public bool EqEnabled { get; set; } = true;
