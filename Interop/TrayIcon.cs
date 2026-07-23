@@ -18,6 +18,7 @@ public sealed class TrayIcon : IDisposable
     private const int WM_TRAYICON = 0x8000 + 1; // WM_APP + 1
     private const uint NIM_ADD = 0, NIM_DELETE = 2;
     private const uint NIF_MESSAGE = 0x1, NIF_ICON = 0x2, NIF_TIP = 0x4;
+    private const int WM_LBUTTONUP = 0x0202;
     private const int WM_LBUTTONDBLCLK = 0x0203;
     private const int WM_RBUTTONUP = 0x0205;
 
@@ -42,7 +43,7 @@ public sealed class TrayIcon : IDisposable
     private readonly IntPtr _hIcon;
     private bool _added;
 
-    public event Action? DoubleClicked;
+    public event Action? Clicked;
     public event Action? RightClicked;
 
     /// <summary>Takes ownership of <paramref name="hIcon"/> and destroys it on Dispose.</summary>
@@ -72,7 +73,11 @@ public sealed class TrayIcon : IDisposable
         {
             switch ((int)lParam)
             {
-                case WM_LBUTTONDBLCLK: DoubleClicked?.Invoke(); break;
+                // A single left click surfaces the window. A double click arrives as UP then DBLCLK;
+                // routing both to the same handler means the second half of a double click is a
+                // harmless idempotent re-show rather than a dead gesture.
+                case WM_LBUTTONUP:
+                case WM_LBUTTONDBLCLK: Clicked?.Invoke(); break;
                 case WM_RBUTTONUP: RightClicked?.Invoke(); break;
             }
             handled = true;

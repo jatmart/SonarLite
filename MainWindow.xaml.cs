@@ -50,6 +50,7 @@ public partial class MainWindow : Window
     private readonly bool _startInTray =
         Environment.GetCommandLineArgs().Contains(AutostartService.TrayArg, StringComparer.OrdinalIgnoreCase);
     private bool _isExiting;
+    private bool _trayParked;
     private System.Windows.Point _dragStart;
     private AppSession? _dragSession;
     private Brush? _colDefaultBrush;
@@ -57,6 +58,20 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        if (_startInTray)
+        {
+            // Launch off-screen and unactivated so the framework can render one real Normal frame
+            // silently -- no visible flash, no focus steal at logon -- before we park it in the tray
+            // in OnContentRendered. That single primed render is what lets the FIRST tray restore
+            // paint and un-minimize on one click: a window parked before it has ever rendered Normal
+            // has no normal-state bounds or live render target, so its first restore no-ops (the
+            // "first click does nothing, second one works" bug). Manual is the default
+            // WindowStartupLocation, so these coordinates are honored.
+            ShowActivated = false;
+            Left = -32000;
+            Top = -32000;
+        }
 
         _audio = new AudioSessionService(_prefs, _routing);
         // The cable's volume is what the volume keys move; the engine's master gain is the only place
@@ -1136,7 +1151,7 @@ public partial class MainWindow : Window
         _trayMenu.Items.Add(exit);
 
         _trayIcon = new TrayIcon(this, NativeIcon.Extract(Environment.ProcessPath!), "SonarLite");
-        _trayIcon.DoubleClicked += ShowFromTray;
+        _trayIcon.Clicked += ShowFromTray;
         _trayIcon.RightClicked += () =>
         {
             _trayMenu.IsOpen = true;
@@ -1144,35 +1159,62 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Fires after the HWND exists but before the window is shown/painted, so hiding here parks a
-    /// logon-launched instance straight in the tray with no visible flash. Handled at this point
-    /// rather than in the ctor because Hide() needs the window source to exist, and rather than on
-    /// Loaded because Loaded runs after the first render (which is the flash we're avoiding).
+    /// Fires after the first frame has actually rendered. For a --tray launch the window was shown
+    /// off-screen and unactivated (see the ctor) precisely so this one real render happens with no
+    /// visible flash and no focus steal; only now do we park it in the tray. Parking after a genuine
+    /// Normal render -- rather than before any render, as an earlier build did in OnSourceInitialized
+    /// -- is what gives the window live normal-state bounds and a render target, so the FIRST tray
+    /// restore paints and un-minimizes on a single click instead of needing a second.
     /// </summary>
-    protected override void OnSourceInitialized(EventArgs e)
+    protected override void OnContentRendered(EventArgs e)
     {
-        base.OnSourceInitialized(e);
-        if (!_startInTray) return;
-        WindowState = WindowState.Minimized; // so a later restore behaves exactly like any tray reopen
+        base.OnContentRendered(e);
+        if (!_startInTray || _trayParked) return;
+        _trayParked = true;
+
         Hide();
+        WindowState = WindowState.Minimized; // park exactly like a later minimize-to-tray
+        // Bring it back on-screen (centered) so the first user-initiated restore appears sensibly.
+        Left = SystemParameters.WorkArea.Left + (SystemParameters.WorkArea.Width - Width) / 2;
+        Top = SystemParameters.WorkArea.Top + (SystemParameters.WorkArea.Height - Height) / 2;
+        ShowActivated = true; // subsequent restores should take focus
     }
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    private const int SW_RESTORE = 9;
 
     private void ShowFromTray()
     {
-        // Restore state BEFORE Show(), not after. The window is parked both Hidden and Minimized, so
-        // calling Show() first paints it minimized on the taskbar, and a WindowState = Normal issued
-        // in the same synchronous pass right after Show() is silently dropped by WPF. That's the
-        // "first double-click only surfaces a minimized stub, second one restores it" bug: the second
-        // click's Show() is a no-op, letting the Normal finally take. Setting state on the still
-        // hidden window makes one click do the whole job.
+        // Make the window visible again and set WPF's own belief to Normal. Doing this in WPF (rather
+        // than only natively) keeps its layout and render pass for the Normal size, which is why the
+        // content paints rather than coming back black.
         WindowState = WindowState.Normal;
         Show();
+
+        // WPF's Normal is not enough on its own: when the window was genuinely native-minimized by a
+        // prior close (IsIconic) *and* hidden, neither WindowState = Normal nor Show() ever issues the
+        // native restore -- the window stays a minimized taskbar button that WPF wrongly reports as
+        // Normal (verified: after Show(), WindowState == Normal yet IsIconic == true). Only a direct
+        // SW_RESTORE un-iconifies it. Safe because the visual tree is already primed at launch (see
+        // OnContentRendered) and WPF already holds the Normal layout, so the restore paints for real.
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+
         Activate();
-        // Show()+Activate() alone doesn't reliably pull the window above whatever's in the
-        // foreground; a brief Topmost bounce forces it to the front without pinning it there.
+        SetForegroundWindow(hwnd);
+        // Activate()/SetForegroundWindow can be refused when we aren't the foreground process; a brief
+        // Topmost bounce forces the window to the front without pinning it there.
         Topmost = true;
         Topmost = false;
-        RefreshDeviceLists(); // one cheap catch-up in case anything raced with the window reopening
+        RefreshDeviceLists(); // one cheap catch-up in case anything raced with the reopen
     }
 
     private void Window_StateChanged(object sender, EventArgs e)
