@@ -35,8 +35,6 @@ public sealed class ProcessLoopbackCapture : IDisposable
 
     public WaveFormat WaveFormat { get; }
 
-    public string? Error { get; private set; }
-
     public event EventHandler<WaveInEventArgs>? DataAvailable;
 
     public ProcessLoopbackCapture(int processId, int sampleRate, int channels, bool excludeTree = false)
@@ -125,7 +123,6 @@ public sealed class ProcessLoopbackCapture : IDisposable
 
             Marshal.ThrowExceptionForHR(client.Start());
             streamed = true;
-            Error = null;
 
             var buffer = new byte[WaveFormat.AverageBytesPerSecond / 4];
             int blockAlign = WaveFormat.BlockAlign;
@@ -157,9 +154,9 @@ public sealed class ProcessLoopbackCapture : IDisposable
 
             try { client.Stop(); } catch { }
         }
-        catch (Exception ex)
+        catch
         {
-            Error = ex.Message;
+            // Activation or streaming broke; the retry loop in Run() re-establishes the tap.
         }
         finally
         {
@@ -199,15 +196,9 @@ public sealed class ProcessLoopbackCapture : IDisposable
             Marshal.FinalReleaseComObject(op);
 
             if (!handler.Completed.Wait(TimeSpan.FromSeconds(5)))
-            {
-                Error = "Loopback activation timed out.";
                 return null;
-            }
             if (handler.ActivateResult != 0 || handler.Client is null)
-            {
-                Error = $"Loopback activation failed (0x{handler.ActivateResult:X8}).";
                 return null;
-            }
             return handler.Client;
         }
         finally

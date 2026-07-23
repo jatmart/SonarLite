@@ -183,8 +183,10 @@ public partial class MainWindow : Window
 
         // Apps silenced onto the cable would stay silent if we vanished without unrouting them.
         // Startup already self-heals, but catch the orderly exits (logoff, shutdown) too.
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => SafeRevertRoutings();
-        System.Windows.Application.Current.SessionEnding += (_, _) => SafeRevertRoutings();
+        // Persistence is coalesced (see PrefsStore.Persist), so a setting changed in the last instant
+        // before logoff/shutdown may still be sitting in the debounce window -- flush it out first.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => { _prefs.Flush(); SafeRevertRoutings(); };
+        System.Windows.Application.Current.SessionEnding += (_, _) => { _prefs.Flush(); SafeRevertRoutings(); };
     }
 
     /// <summary>
@@ -440,10 +442,12 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Dragging a band slider fires a change on every tick; PersistAndApply does synchronous disk
-    /// I/O (Equalizer APO's config file, prefs.json), so calling it unthrottled would block the UI
-    /// thread dozens of times per drag gesture. Apply immediately, then cap follow-up writes to
-    /// once per ~80ms with a trailing call so the final dragged value is never dropped.
+    /// Dragging a band slider fires a change on every tick. The prefs write is already coalesced at
+    /// the source (see PrefsStore.Persist), so this no longer exists to throttle disk I/O -- its job
+    /// now is the engine work PersistAndApply also does: rebuilding the bus's biquad filters and
+    /// rerunning the makeup-gain sweep. Swapping in fresh filters resets their state, so doing it on
+    /// every tick is both wasted work and a source of zipper noise. Apply immediately for a live
+    /// response, then cap follow-ups to ~80ms with a trailing call so the final value is never dropped.
     /// </summary>
     private void ThrottledPersistAndApply(SessionClass profile)
     {
@@ -1246,6 +1250,7 @@ public partial class MainWindow : Window
     {
         if (_isExiting)
         {
+            _prefs.Flush();   // commit any change still inside the persistence debounce window
             _hid.Dispose();
             _refreshTimer.Stop();
             _meterTimer.Stop();

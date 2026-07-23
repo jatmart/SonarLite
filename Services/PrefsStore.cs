@@ -18,7 +18,6 @@ public sealed class PrefsStore
 
     private Dictionary<string, SessionPrefs> _sessions = new(StringComparer.OrdinalIgnoreCase);
 
-    public bool StartWithWindows { get; set; }
     public Dictionary<string, double[]> EqGains { get; set; } = new();       // keyed by SessionClass name
     public Dictionary<string, string> EqPresets { get; set; } = new();       // profile -> preset name
     public bool EqEnabled { get; set; } = true;
@@ -103,7 +102,6 @@ public sealed class PrefsStore
                 if (data is not null)
                 {
                     _sessions = new Dictionary<string, SessionPrefs>(data.Sessions, StringComparer.OrdinalIgnoreCase);
-                    StartWithWindows = data.StartWithWindows;
                     EqGains = data.EqGains;
                     EqPresets = data.EqPresets;
                     EqEnabled = data.EqEnabled;
@@ -120,35 +118,71 @@ public sealed class PrefsStore
         }
     }
 
+    // Every setting flows through Persist(): app + bus faders, mutes, EQ curves, device promotions.
+    // The backing collections are mutated only on the UI thread, so the JSON snapshot is taken there
+    // (race-free) the instant something changes; only the disk write is deferred and coalesced. A
+    // slider drag calls this dozens of times a second, and writing the whole file synchronously on the
+    // UI thread on every one of those ticks -- which is what this used to do -- was real per-frame disk
+    // I/O. Now the write lands at most once per debounce window however fast the values change, and it
+    // never runs on the UI thread. The EQ band-drag path had its own throttle bolted on for exactly
+    // this reason; the volume/mute faders had none and hammered the disk every tick. Coalescing here,
+    // at the one choke point they all share, fixes every caller at once instead of per-caller patches.
+    private readonly object _snapshotGate = new();   // guards _pendingJson + the timer; UI thread holds it only momentarily
+    private readonly object _fileGate = new();        // serializes the actual write; never taken on the UI Persist() path
+    private System.Threading.Timer? _flushTimer;
+    private string? _pendingJson;
+
     public void Persist()
     {
-        try
+        string json;
+        try { json = JsonSerializer.Serialize(Snapshot()); }
+        catch { return; }   // a value that won't serialize must not take the app down
+
+        lock (_snapshotGate)
         {
-            Directory.CreateDirectory(DirPath);
-            var data = new StoredData
-            {
-                Sessions = _sessions,
-                StartWithWindows = StartWithWindows,
-                EqGains = EqGains,
-                EqPresets = EqPresets,
-                EqEnabled = EqEnabled,
-                PlaybackPriority = PlaybackPriority,
-                RecordingPriority = RecordingPriority,
-                BusVolumes = BusVolumes,
-                BusMuted = BusMuted
-            };
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(data));
-        }
-        catch
-        {
-            // Best-effort persistence; losing prefs across restarts is non-fatal.
+            _pendingJson = json;
+            _flushTimer ??= new System.Threading.Timer(_ => FlushPending());
+            _flushTimer.Change(TimeSpan.FromMilliseconds(400), Timeout.InfiniteTimeSpan);
         }
     }
+
+    /// <summary>Write any pending change to disk right now, synchronously. Called on shutdown so a tweak
+    /// made inside the debounce window still survives the process exiting.</summary>
+    public void Flush()
+    {
+        lock (_snapshotGate) _flushTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        FlushPending();
+    }
+
+    private void FlushPending()
+    {
+        string? json;
+        lock (_snapshotGate) { json = _pendingJson; _pendingJson = null; }
+        if (json is null) return;   // nothing changed since the last write
+        lock (_fileGate)
+        {
+            try { Directory.CreateDirectory(DirPath); File.WriteAllText(FilePath, json); }
+            catch { /* best-effort; losing prefs across restarts is non-fatal */ }
+        }
+    }
+
+    // Built and serialized on the UI thread so it reads the live collections while nothing else mutates
+    // them; the deferred write only ever touches the resulting immutable string, never these fields.
+    private StoredData Snapshot() => new()
+    {
+        Sessions = _sessions,
+        EqGains = EqGains,
+        EqPresets = EqPresets,
+        EqEnabled = EqEnabled,
+        PlaybackPriority = PlaybackPriority,
+        RecordingPriority = RecordingPriority,
+        BusVolumes = BusVolumes,
+        BusMuted = BusMuted
+    };
 
     private sealed class StoredData
     {
         public Dictionary<string, SessionPrefs> Sessions { get; set; } = new();
-        public bool StartWithWindows { get; set; }
         public Dictionary<string, double[]> EqGains { get; set; } = new();
         public Dictionary<string, string> EqPresets { get; set; } = new();
         public bool EqEnabled { get; set; } = true;
