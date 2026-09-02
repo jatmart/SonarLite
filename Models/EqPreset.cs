@@ -41,9 +41,9 @@ public sealed record EqPreset(string Name, double[] Gains, double PreampDb = 0, 
     public static readonly EqPreset Flat = new("Flat", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
     // Bass-heavy V-curve in the spirit of SteelSeries GG's "Immersive": big low-shelf lift,
-    // scooped low-mids, sparkle on top. Its stacked bass bands make this the peakiest curve we
-    // ship (+11.2 dB at 59 Hz), so strict normalization leaves it noticeably quieter than the
-    // others -- the preamp buys a little of that back.
+    // scooped low-mids, sparkle on top. Its stacked bass bands add more broadband energy than any
+    // other curve we ship (+6.5 dB pink-weighted, against Pebble V2's +3.3), so loudness matching
+    // still leaves it the quietest of the set -- the preamp buys a little of that back.
     public static readonly EqPreset Immersive = new("Immersive", [8, 7, 5, 2, -1, -1.5, 1, 3.5, 5, 6], PreampDb: 2);
 
     // Immersive, corrected for the Arctis Nova Pro's measured response. Same V-curve character;

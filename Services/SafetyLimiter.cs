@@ -5,8 +5,10 @@ namespace SonarLite.Services;
 /// <summary>
 /// Last stage before the render device: guarantees nothing leaves the engine above full scale.
 ///
-/// Per-bus EQ makeup already keeps each bus at unity or below, but the master mixer sums three of
-/// them (Game + Chat + Media), and three sources each peaking near 0 dBFS add up well past 1.0.
+/// Per-bus EQ makeup keeps each bus at the *loudness* of a flat curve, which deliberately leaves
+/// room for a boosted band to peak above 1.0 on its own -- normalizing that peak away instead cost
+/// 5 to 9 dB on every preset. On top of that the master mixer sums three buses (Game + Chat +
+/// Media), and three sources each peaking near 0 dBFS add up well past 1.0.
 /// WasapiOut hands floats straight to the Windows shared mixer, which hard-clips anything over the
 /// ceiling -- audible as distortion, and the extra RMS a clipped waveform carries is enough to trip
 /// the protection cutout on a powered speaker. So this rides gain down instead of letting that

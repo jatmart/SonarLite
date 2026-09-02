@@ -3,7 +3,8 @@ using NAudio.Wave;
 
 namespace SonarLite.Services;
 
-/// <summary>10-band peaking-EQ chain applied per channel, with automatic negative makeup gain to prevent clipping.</summary>
+/// <summary>10-band peaking-EQ chain applied per channel, with automatic makeup gain that holds the bus
+/// at the loudness it had before the EQ.</summary>
 internal sealed class EqChain(ISampleProvider source) : ISampleProvider
 {
     private static readonly float[] Freqs = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -41,20 +42,34 @@ internal sealed class EqChain(ISampleProvider source) : ISampleProvider
     }
 
     /// <summary>
-    /// Attenuation that brings the cascade's loudest point back to unity. This has to be measured
-    /// from the combined magnitude response, not from gains.Max(): the bands sit an octave apart at
-    /// Q=1, which is wide enough that neighbours pile onto each other. Immersive's [8,7,5,...] bass
-    /// bands sum to roughly +13 dB near 50 Hz, so trimming only the largest band's 8 dB still leaves
-    /// the bus several dB over full scale -- which is what was hard-clipping in the Windows mixer
-    /// (gross distortion, plus enough extra RMS to trip a powered speaker's protection cutout).
+    /// Attenuation that brings the cascade back to the loudness it had before the EQ, measured as
+    /// the energy the curve adds to broadband material rather than the height of its tallest peak.
+    ///
+    /// It has to be measured from the combined magnitude response, not from gains.Max(): the bands
+    /// sit an octave apart at Q=1, which is wide enough that neighbours pile onto each other, so no
+    /// single slider tells you what the chain does.
+    ///
+    /// This used to normalize the response *peak* to unity, which assumes the signal carries
+    /// full-scale content at the exact frequency where those bands pile up. Music does not -- its
+    /// energy is spread across the spectrum. Pebble V2 peaks +7.7 dB at 125 Hz but adds only
+    /// +3.3 dB to pink noise, and the 4.4 dB difference came off every sample whether or not
+    /// anything was playing at 125 Hz. Across the shipped presets that cost 5 to 9 dB, which is
+    /// what "everything is at 100% and it is still quiet" was.
+    ///
+    /// Peaks that do overshoot are caught by <see cref="SafetyLimiter"/>, which clamps the final
+    /// mix at 0.99 and cannot be exceeded. That is what makes measuring loudness here safe: the
+    /// clip protection this method used to provide is already guaranteed one stage downstream.
     /// </summary>
     private static float MakeupFor(double[] gains, int sampleRate)
     {
-        // Log sweep from 10 Hz to just under Nyquist; fine enough to land on any peak these
-        // fixed-Q bands can produce.
-        const int points = 512;
-        double lo = Math.Log(10.0), hi = Math.Log(sampleRate * 0.49);
-        double peak = 1.0;
+        // Log sweep over the audible band, averaging |H|^2. Log spacing is the weighting: it gives
+        // every octave the same share of the result, which is how program material spreads its
+        // energy. Sweeping to Nyquist instead would average in ultrasonic bands that no source
+        // plays into and no headset reproduces, dragging the answer toward whatever the top band
+        // happens to be doing.
+        const int points = 1024;
+        double lo = Math.Log(20.0), hi = Math.Log(Math.Min(20000.0, sampleRate * 0.49));
+        double energy = 0;
 
         for (int i = 0; i < points; i++)
         {
@@ -62,10 +77,13 @@ internal sealed class EqChain(ISampleProvider source) : ISampleProvider
             double mag = 1.0;
             for (int b = 0; b < gains.Length; b++)
                 mag *= PeakingMagnitude(sampleRate, Freqs[b], Q, gains[b], f);
-            if (mag > peak) peak = mag;
+            energy += mag * mag;
         }
 
-        return (float)(1.0 / peak);
+        // Never louder than flat. A curve that cuts more than it boosts stays where the user put
+        // it rather than being pushed back up -- quieter is the point of those presets.
+        double rms = Math.Sqrt(energy / points);
+        return rms <= 1.0 ? 1f : (float)(1.0 / rms);
     }
 
     /// <summary>|H(e^jw)| of one RBJ peaking biquad -- the same design NAudio's PeakingEQ builds.</summary>
