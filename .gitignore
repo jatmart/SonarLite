@@ -29,3 +29,7 @@ Thumbs.db
 
 # Local Claude Code config (hooks, settings)
 .claude/
+
+# Scratch proof-of-concepts: ~18MB of third-party installers and extracted drivers.
+# Local reference only; publish.ps1 -Push commits everything, so keep them out of the repo.
+spikes/

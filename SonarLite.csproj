@@ -33,6 +33,17 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- spikes\ holds throwaway proof-of-concept material, including HidSpike — a second console
+         project with its own Program.cs. The SDK globs **/*.cs by default, so without these
+         Remove items the app fails to build with two entry points. -->
+    <Compile Remove="spikes\**" />
+    <Page Remove="spikes\**" />
+    <Resource Remove="spikes\**" />
+    <None Remove="spikes\**" />
+    <EmbeddedResource Remove="spikes\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="HidSharp" Version="2.6.4" />
     <PackageReference Include="NAudio" Version="2.3.0" />
   </ItemGroup>
