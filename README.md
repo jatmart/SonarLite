@@ -28,14 +28,21 @@ anything else. If you have different hardware, feel free to fork it and adapt th
 SonarLite doesn't create virtual audio devices itself — it relies on one free driver to do that,
 plus the .NET runtime to run on.
 
-1. **Windows 10 or 11.**
+1. **Windows 11.** Per-app capture uses a Windows API that
+   [Microsoft documents](https://learn.microsoft.com/en-us/windows/win32/api/audioclientactivationparams/ns-audioclientactivationparams-audioclient_activation_params)
+   as needing build 20348 or later. Windows 10 22H2 is build 19045, so it falls below that.
 2. **[.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)** (the "Desktop
-   Runtime" x64 installer, not just the ASP.NET or generic runtime). Skip this if you already
-   have Visual Studio 2022+ with .NET 8 installed.
+   Runtime" x64 installer, not just the ASP.NET or generic runtime). The release zip doesn't
+   bundle it, and a newer runtime such as .NET 10 doesn't stand in for it. Skip this if you
+   already have Visual Studio 2022+ with .NET 8 installed.
 3. **[VB-Audio VB-Cable](https://vb-audio.com/Cable/)** — download the free "VB-CABLE Driver"
    zip (**not** the paid "VB-Cable A+B" pack), run `VBCABLE_Setup_x64.exe` as administrator, and
    reboot when it asks. This installs one virtual audio device pair named `CABLE Input` /
    `CABLE Output` — SonarLite looks for that exact name, so don't rename it during setup.
+   Without the cable, SonarLite opens but its audio engine doesn't start, so per-app EQ stays
+   off and the window shows a "VB-Cable not found" message. While the engine runs, `CABLE Input`
+   stays the Windows default playback device. That's expected: your audio still reaches the
+   headset through SonarLite.
 
 That's it — no other software required. In particular, SonarLite does **not** need Equalizer
 APO or SteelSeries GG installed; all EQ runs in SonarLite's own DSP chain. (If you happen to have

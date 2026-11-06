@@ -170,7 +170,7 @@ if ($doRelease) {
 $changelog
 
 ## Install
-Requires the **.NET 8 Desktop Runtime** (win-x64). Download ``SonarLite-$tag-win-x64.zip``, extract, and run ``SonarLite.exe``. Use the in-app **Start with Windows** checkbox to enable autostart.
+Requires Windows 11, the **.NET 8 Desktop Runtime** (win-x64), and the free **VB-Cable** driver. See the [setup steps](https://github.com/jatmart/SonarLite#what-you-need-before-installing). Download ``SonarLite-$tag-win-x64.zip``, extract, and run ``SonarLite.exe``. Use the in-app **Start with Windows** checkbox to enable autostart.
 "@
         }
 
