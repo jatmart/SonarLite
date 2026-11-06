@@ -124,6 +124,9 @@ public sealed class AudioEngine : IDisposable
         {
             try
             {
+                // Owned from here on: every failure path below runs StopLocked, which disposes it.
+                _renderDevice = headset;
+
                 // Match the endpoint's mix rate so nothing has to resample on the way out.
                 int rate = headset.AudioClient.MixFormat.SampleRate;
                 _format = WaveFormat.CreateIeeeFloatWaveFormat(rate, 2);
@@ -144,20 +147,21 @@ public sealed class AudioEngine : IDisposable
                 // back up by it.
                 _masterVolume = new VolumeSampleProvider(master) { Volume = _masterMute ? 0f : _masterGain };
 
-                _output = new WasapiOut(headset, AudioClientShareMode.Shared, true, 50);
-                _output.Init(new SafetyLimiter(_masterVolume));
-                _output.Play();
+                // Opened here rather than on the first tap so a dead endpoint still fails the
+                // start, exactly as it always has, instead of silently succeeding and only
+                // breaking later when audio finally arrives.
+                ResumeOutputLocked();
 
-                _renderDevice = headset;
                 try { RenderDeviceName = headset.FriendlyName; } catch { RenderDeviceName = null; }
                 IsRunning = true;
                 Status = "Running";
+                // Nothing is tapped yet, so the stream just proven good parks again immediately.
+                UpdateOutputStateLocked();
                 return true;
             }
             catch (Exception ex)
             {
                 Status = $"Failed: {ex.Message}";
-                try { headset.Dispose(); } catch { }
                 StopLocked();
                 return false;
             }
@@ -208,7 +212,68 @@ public sealed class AudioEngine : IDisposable
                         AddTapLocked(bus, pid);
                 }
             }
+
+            UpdateOutputStateLocked();
         }
+    }
+
+    /// <summary>
+    /// Hold the render stream open only while at least one app is actually tapped.
+    ///
+    /// A playing WASAPI stream makes Windows raise a SYSTEM power request for as long as it runs,
+    /// and the machine cannot reach idle sleep while one stands. On the Arctis, a USB audio device,
+    /// it surfaces as an unnamed "Legacy Kernel Caller" that no powercfg requestsoverride can
+    /// suppress. Rendering silence around the clock was therefore enough on its own to stop this
+    /// machine sleeping for weeks. Measured with a probe that opened this one stream and did
+    /// nothing else: the two requests appeared, and closing it cleared them.
+    ///
+    /// Parking costs nothing audible. A tap exists exactly while an app is Active on the cable, the
+    /// same condition under which anything is mixed back at all, and SessionsChanged pushes that
+    /// state through as soon as WASAPI reports it. With no taps the mixer sums silence into a
+    /// stream no one can hear.
+    /// </summary>
+    private void UpdateOutputStateLocked()
+    {
+        if (!IsRunning) return;
+        bool needed = _buses.Values.Any(b => b.Taps.Count > 0);
+
+        if (needed && _output is null)
+        {
+            try
+            {
+                ResumeOutputLocked();
+                Status = "Running";
+            }
+            catch (Exception ex)
+            {
+                // Stay parked and keep the engine armed. The next tap change tries again, which is
+                // what a headset that was simply powered off for a moment needs.
+                Status = $"Render failed: {ex.Message}";
+                ParkOutputLocked();
+            }
+        }
+        else if (!needed && _output is not null)
+        {
+            ParkOutputLocked();
+        }
+    }
+
+    /// <summary>Build and start the render stream. Throws if the endpoint refuses it.</summary>
+    private void ResumeOutputLocked()
+    {
+        _output = new WasapiOut(_renderDevice!, AudioClientShareMode.Shared, true, 50);
+        _output.Init(new SafetyLimiter(_masterVolume!));
+        _output.Play();
+    }
+
+    /// <summary>Release the render stream and the power request that comes with it. Safe to call
+    /// when already parked. The mixer graph, the EQ curves and the master gain all survive, so a
+    /// resume is just a new WasapiOut over the same providers.</summary>
+    private void ParkOutputLocked()
+    {
+        try { _output?.Stop(); } catch { }
+        _output?.Dispose();
+        _output = null;
     }
 
     private void AddTapLocked(Bus bus, int pid)
@@ -290,14 +355,13 @@ public sealed class AudioEngine : IDisposable
                 RemoveTapLocked(bus, pid);
         _buses.Clear();
 
-        try { _output?.Stop(); } catch { }
-        _output?.Dispose();
-        _output = null;
+        ParkOutputLocked();
 
         try { _renderDevice?.Dispose(); } catch { }
         _renderDevice = null;
         RenderDeviceName = null;
         _format = null;
+        _masterVolume = null;
     }
 
     public void Dispose() => Stop();
